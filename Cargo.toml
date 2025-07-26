@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 rand = "0.9.1"
 sha1 = "0.10.6"
+tokio = { version = "1.47.0", features = ["full"] }

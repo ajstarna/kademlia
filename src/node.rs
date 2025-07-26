@@ -20,15 +20,15 @@ impl KBucket {
     }
 }
 
-
 /// A binary tree whose leaves are K-buckets.
 /// Each k-bucket contains nodes with some common prefix
 /// of their ids.
 enum BucketTree {
     Bucket(KBucket),
     Branch {
-        one: Box<RoutingTable>,
-        zero: Box<RoutingTable>,
+        bit_index: usize, // which bit this branch splits on
+        one: Box<BucketTree>,
+        zero: Box<BucketTree>,
     },
 }
 
@@ -37,26 +37,25 @@ struct RoutingTable {
     tree: BucketTree,
 }
 
-
 impl RoutingTable {
     pub fn new(my_id: NodeID, k: usize) -> Self {
-	Self {
-	    my_id,
+        Self {
+            my_id,
             tree: BucketTree::Bucket(KBucket::new(k)),
-	}
+        }
     }
 
-    pub fn insert(
+    //pub fn insert(
 }
 
-struct Node {
-    my_info: NodeInfo,
-    routing_table: RoutingTable,
+pub struct Node {
+    pub my_info: NodeInfo,
+    pub routing_table: RoutingTable,
 }
 
 impl Node {
     pub fn new(k: usize) -> Self {
-	let my_id = NodeID::new();
+        let my_id = NodeID::new();
         let my_info = NodeInfo {
             ip_address: "todo".to_owned(),
             udp_port: "todo".to_owned(),
@@ -70,13 +69,12 @@ impl Node {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
     fn it_works() {
-	let _node = Node::new(K);
+        let _node = Node::new(K);
     }
 }
