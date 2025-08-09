@@ -73,8 +73,8 @@ impl RoutingTable {
 		    println!("branch");
 		    let bit_val = peer.node_id.get_bit_at(*bit_index);
 		    match bit_val {
-			0 => (),
-			1 => (),
+			0 => current = zero,
+			1 => current = one,
 			_ => panic!("Programmer error: bit value is neither 0 nor 1!"),
 		    }
 		}
