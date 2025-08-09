@@ -1,8 +1,9 @@
 use rand::RngCore;
 
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Key(pub [u8; 20]);
 
 impl Key {
@@ -15,7 +16,7 @@ impl Key {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeID(pub [u8; 20]);
 
 impl NodeID {

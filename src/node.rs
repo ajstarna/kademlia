@@ -1,14 +1,18 @@
+use std::net::IpAddr;
+
 use crate::identifier::NodeID;
 
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
 const K: usize = 20;
 
-struct NodeInfo {
-    ip_address: String,
-    udp_port: String,
-    node_id: NodeID,
+#[derive(Debug)]
+pub struct NodeInfo {
+    pub ip_address: IpAddr,
+    pub udp_port: u16,
+    pub node_id: NodeID,
 }
 
+#[derive(Debug)]
 struct KBucket {
     node_infos: Vec<NodeInfo>, // TODO: LRU
 }
@@ -23,6 +27,7 @@ impl KBucket {
 /// A binary tree whose leaves are K-buckets.
 /// Each k-bucket contains nodes with some common prefix
 /// of their ids.
+#[derive(Debug)]
 enum BucketTree {
     Bucket(KBucket),
     Branch {
@@ -32,7 +37,8 @@ enum BucketTree {
     },
 }
 
-struct RoutingTable {
+#[derive(Debug)]
+pub struct RoutingTable {
     my_id: NodeID,
     tree: BucketTree,
 }
@@ -45,20 +51,23 @@ impl RoutingTable {
         }
     }
 
-    //pub fn insert(
+    pub fn insert(&mut self, peer: NodeInfo) {
+        println!("{:?}", peer);
+    }
 }
 
+#[derive(Debug)]
 pub struct Node {
     pub my_info: NodeInfo,
     pub routing_table: RoutingTable,
 }
 
 impl Node {
-    pub fn new(k: usize) -> Self {
+    pub fn new(k: usize, ip: IpAddr, port: u16) -> Self {
         let my_id = NodeID::new();
         let my_info = NodeInfo {
-            ip_address: "todo".to_owned(),
-            udp_port: "todo".to_owned(),
+            ip_address: ip,
+            udp_port: port,
             node_id: my_id,
         };
 
@@ -72,9 +81,14 @@ impl Node {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn it_works() {
-        let _node = Node::new(K);
+        let info = NodeInfo {
+            ip_address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            udp_port: 8080,
+            node_id: NodeID::new(), // assuming you have this
+        };
     }
 }
