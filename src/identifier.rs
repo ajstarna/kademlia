@@ -26,6 +26,13 @@ impl NodeID {
         rand::rng().fill_bytes(&mut bytes);
         Self(bytes)
     }
+
+    pub fn get_bit_at(self, bit_index: usize) -> u8 {
+	let byte_index = bit_index / 8;
+	let bit_within_byte = bit_index % 8;
+	let shift_amount = 7 - bit_within_byte;
+	(self.0[byte_index] >> shift_amount) & 1u8
+    }
 }
 
 pub trait KademliaID {
@@ -56,5 +63,36 @@ impl Distance {
             out[i] = a[i] ^ b[i];
         }
         Distance(out)
+    }
+}
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn find_bits() {
+        let mut bytes = [0u8; 20];
+	bytes[1] = 5; // 00000101
+	bytes[10] = 64 ; // 01000000
+
+	let node_id = NodeID(bytes);
+
+	assert_eq!(node_id.get_bit_at(5), 0); // first byte is all zeros
+
+	// second byte
+	assert_eq!(node_id.get_bit_at(8), 0);
+	assert_eq!(node_id.get_bit_at(13), 1);
+	assert_eq!(node_id.get_bit_at(14), 0);
+	assert_eq!(node_id.get_bit_at(15), 1);
+
+	// 10th byte
+	assert_eq!(node_id.get_bit_at(80), 0);
+	assert_eq!(node_id.get_bit_at(81), 1);
+	assert_eq!(node_id.get_bit_at(82), 0);
+
+
+
     }
 }

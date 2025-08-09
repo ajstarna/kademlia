@@ -14,13 +14,19 @@ pub struct NodeInfo {
 
 #[derive(Debug)]
 struct KBucket {
+    k: usize,
     node_infos: Vec<NodeInfo>, // TODO: LRU
 }
 impl KBucket {
     pub fn new(k: usize) -> Self {
         Self {
+	    k,
             node_infos: Vec::with_capacity(k),
         }
+    }
+
+    pub fn is_full(&self) -> bool {
+	self.node_infos.len() >= self.k
     }
 }
 
@@ -53,6 +59,28 @@ impl RoutingTable {
 
     pub fn insert(&mut self, peer: NodeInfo) {
         println!("{:?}", peer);
+	let mut current = &mut self.tree;
+	loop {
+	    match current {
+		BucketTree::Bucket(ref mut bucket) => {
+		    println!("bucket");
+		    if bucket.is_full() {
+			// split the bucket (if not at the last bit)
+		    }
+		    break;
+		},
+		BucketTree::Branch { bit_index, ref one, ref zero } => {
+		    println!("branch");
+		    let bit_val = peer.node_id.get_bit_at(*bit_index);
+		    match bit_val {
+			0 => (),
+			1 => (),
+			_ => panic!("Programmer error: bit value is neither 0 nor 1!"),
+		    }
+		}
+	    }
+	}
+
     }
 }
 
