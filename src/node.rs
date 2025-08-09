@@ -1,5 +1,7 @@
 use std::net::IpAddr;
 
+use anyhow::bail;
+
 use crate::identifier::NodeID;
 
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
@@ -28,6 +30,15 @@ impl KBucket {
     pub fn is_full(&self) -> bool {
 	self.node_infos.len() >= self.k
     }
+
+    pub fn insert(&mut self, info: NodeInfo) -> anyhow::Result<()>{
+	if self.node_infos.len() >= self.k {
+	    bail!("Cannot insert into a full K bucket!");
+	}
+	self.node_infos.push(info);
+	Ok(())
+    }
+
 }
 
 /// A binary tree whose leaves are K-buckets.
@@ -57,7 +68,11 @@ impl RoutingTable {
         }
     }
 
-    pub fn insert(&mut self, peer: NodeInfo) {
+    // TODO: need a result type here
+    // Inserted
+    // Rejected
+    // NeedsProbe(peer) # ping the lru in a bucket
+    pub fn insert(&mut self, peer: NodeInfo) -> anyhow::Result<()> {
         println!("{:?}", peer);
 	let mut current = &mut self.tree;
 	loop {
@@ -65,11 +80,16 @@ impl RoutingTable {
 		BucketTree::Bucket(ref mut bucket) => {
 		    println!("bucket");
 		    if bucket.is_full() {
-			// split the bucket (if not at the last bit)
+			// if my id in bucket, then split
+			// else: ping the lru and return a NeedsProbe result
+
+
+		    } else {
+			bucket.insert(peer)?;
 		    }
-		    break;
+		    break Ok(());
 		},
-		BucketTree::Branch { bit_index, ref one, ref zero } => {
+		BucketTree::Branch { bit_index, ref mut  one, ref mut zero } => {
 		    println!("branch");
 		    let bit_val = peer.node_id.get_bit_at(*bit_index);
 		    match bit_val {
