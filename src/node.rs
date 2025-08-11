@@ -60,10 +60,17 @@ enum BucketTree {
 }
 
 
+/// The ID corresponding to an attempted insert on a full K bucket.
+/// A probe is sent out to the LRU, and if they do not respond in time,
+/// then we boot them from the bucket and finish the new insertion.
+/// The ID tells us which initial attempted insert is ready to resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProbeID(u64);
+
 enum InsertResult{
     Inserted,
     AlreadyPresent,
-    NeedsProbe{lru: NodeInfo, cookie: TODO},
+    NeedsProbe{lru: NodeInfo, probe_id: ProbeID},
     SplitOccured
 }
 
