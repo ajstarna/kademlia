@@ -2,7 +2,8 @@ use std::net::IpAddr;
 
 use anyhow::bail;
 
-use crate::identifier::NodeID;
+mod identifier;
+use identifier::NodeID;
 
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
 const K: usize = 20;
@@ -13,6 +14,7 @@ pub struct NodeInfo {
     pub udp_port: u16,
     pub node_id: NodeID,
 }
+
 
 #[derive(Debug)]
 struct KBucket {
@@ -31,12 +33,12 @@ impl KBucket {
         self.node_infos.len() >= self.k
     }
 
-    pub fn insert(&mut self, info: NodeInfo) -> anyhow::Result<()> {
+    pub fn insert(&mut self, info: NodeInfo){
         if self.node_infos.len() >= self.k {
-            bail!("Cannot insert into a full K bucket!");
+	    // we should not even be calling this
+            unreachable!("Cannot insert into a full K bucket!");
         }
         self.node_infos.push(info);
-        Ok(())
     }
 
     pub fn contains_id(&self, search_id: NodeID) -> bool {
@@ -57,6 +59,15 @@ enum BucketTree {
     },
 }
 
+
+enum InsertResult{
+    Inserted,
+    AlreadyPresent,
+    NeedsProbe{lru: NodeInfo, cookie: TODO},
+    SplitOccured
+}
+
+
 #[derive(Debug)]
 pub struct RoutingTable {
     my_id: NodeID,
@@ -72,13 +83,13 @@ impl RoutingTable {
     }
 
     /// Collect every NodeInfo in the tree. Handy for tests and simple impls.
-    fn all_nodes<'a>(&'a self) -> Vec<&'a NodeInfo> {
+    fn all_nodes(& self) -> Vec<& NodeInfo> {
         fn walk<'a>(t: &'a BucketTree, out: &mut Vec<&'a NodeInfo>) {
             match t {
                 BucketTree::Bucket(b) => out.extend(b.node_infos.iter()),
                 BucketTree::Branch { one, zero, .. } => {
-                    walk(&one, out);
-                    walk(&zero, out);
+                    walk(one, out);
+                    walk(zero, out);
                 }
             }
         }
@@ -103,22 +114,22 @@ impl RoutingTable {
     // Rejected
     // NeedsProbe(peer) # ping the lru in a bucket
     pub fn insert(&mut self, peer: NodeInfo) -> anyhow::Result<()> {
-        println!("{:?}", peer);
+        println!("{peer:?}");
         let mut current = &mut self.tree;
         loop {
             match current {
                 BucketTree::Bucket(ref mut bucket) => {
                     println!("bucket");
                     if bucket.is_full() {
-                        // if my id in bucket, then split
                         if bucket.contains_id(self.my_id) {
+                            // if my id in bucket, then split
                             println!("we need to split this bucket that contains our own node id");
                         } else {
                             // ping the lru and return a NeedsProbe result
                             println!("We need to probe the LRU node in this full bucket to possibly replace")
                         }
                     } else {
-                        bucket.insert(peer)?;
+                        bucket.insert(peer);
                     }
                     break Ok(());
                 }

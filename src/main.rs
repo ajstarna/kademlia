@@ -1,6 +1,5 @@
 use tokio::net::UdpSocket;
 
-mod identifier;
 mod node;
 mod protocol;
 
