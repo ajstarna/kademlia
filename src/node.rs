@@ -18,7 +18,7 @@ pub struct NodeInfo {
 #[derive(Debug)]
 struct KBucket {
     k: usize,
-    pub range: (NodeID, NodeID),  // inclusive low, exclusive high
+    //pub range: (NodeID, NodeID),  // inclusive low, exclusive high
     node_infos: Vec<NodeInfo>, // TODO: LRU
 }
 impl KBucket {
@@ -41,10 +41,12 @@ impl KBucket {
         self.node_infos.push(info);
     }
 
+    /*
     pub fn contains_range(&self, id: NodeID) -> bool {
         let (low, high) = self.range;
         id >= low && id < high
     }
+    */
 
     pub fn contains_id(&self, search_id: NodeID) -> bool {
         self.node_infos.iter().any(|info| info.node_id == search_id)
@@ -157,6 +159,7 @@ impl RoutingTable {
 			else if bucket.is_full() {
                             if bucket.contains_id(self.my_id) {
 				// if my id in bucket, then split
+				// TODO: actually just check for range, not literal membership
 				println!("we need to split this bucket that contains our own node id");
 				// TODO: do split
 				InsertResult::SplitOccurred
