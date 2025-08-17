@@ -7,7 +7,7 @@ use identifier::NodeID;
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
 const K: usize = 20;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeInfo {
     pub ip_address: IpAddr,
     pub udp_port: u16,
@@ -18,6 +18,7 @@ pub struct NodeInfo {
 #[derive(Debug)]
 struct KBucket {
     k: usize,
+    pub range: (NodeID, NodeID),  // inclusive low, exclusive high
     node_infos: Vec<NodeInfo>, // TODO: LRU
 }
 impl KBucket {
@@ -40,8 +41,18 @@ impl KBucket {
         self.node_infos.push(info);
     }
 
+    pub fn contains_range(&self, id: NodeID) -> bool {
+        let (low, high) = self.range;
+        id >= low && id < high
+    }
+
     pub fn contains_id(&self, search_id: NodeID) -> bool {
         self.node_infos.iter().any(|info| info.node_id == search_id)
+    }
+
+    /// Returns a mutable reference to the entry with this NodeID, if present.
+    pub fn find_mut(&mut self, id: NodeID) -> Option<&mut NodeInfo> {
+        self.node_infos.iter_mut().find(|n| n.node_id == id)
     }
 }
 
@@ -67,15 +78,17 @@ enum BucketTree {
 pub struct ProbeID(u64);
 
 impl ProbeID {
-    pub fn random() -> Self {
+    pub fn new_random() -> Self {
         let val: u64 = rand::rng().random();
         Self(val)
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InsertResult{
-    Inserted,
-    AlreadyPresent,
+    Inserted,  // normal insertion
+    AlreadyPresent, // exact nodeinfo already exists
+    Updated, // The node_id existed but with different contact info
     NeedsProbe{lru: NodeInfo, probe_id: ProbeID},
     SplitOccurred
 }
@@ -130,7 +143,18 @@ impl RoutingTable {
                 BucketTree::Bucket(ref mut bucket) => {
                     println!("bucket");
 		    let result: InsertResult = {
-			if bucket.is_full() {
+			if let Some(existing) = bucket.find_mut(peer.node_id) {
+			    // If node_id already exists, optionally update its contact info (ip/port).
+			    if *existing == peer {
+				InsertResult::AlreadyPresent
+			    }
+			    else {
+				existing.ip_address = peer.ip_address;
+				existing.udp_port = peer.udp_port;
+				InsertResult::Updated
+			    }
+			}
+			else if bucket.is_full() {
                             if bucket.contains_id(self.my_id) {
 				// if my id in bucket, then split
 				println!("we need to split this bucket that contains our own node id");
@@ -139,7 +163,9 @@ impl RoutingTable {
                             } else {
 				// ping the lru and return a NeedsProbe result
 				println!("We need to probe the LRU node in this full bucket to possibly replace");
-				InsertResult::NeedsProbe{lru: NodeInfo, probe_id: ProbeID}
+				let lru = *bucket.node_infos.last().expect("We know the bucket is full");
+				let probe_id = ProbeID::new_random();
+				InsertResult::NeedsProbe{lru, probe_id}
                             }
 			} else {
                             bucket.insert(peer);
@@ -215,6 +241,18 @@ mod test {
         }
     }
 
+    /// Helper function that returns a table with a single full bucket.
+    fn setup_full_bucket(k: usize) -> RoutingTable {
+	let my_id: NodeID = id_with_first_byte(0xAA);
+	let mut rt: RoutingTable = RoutingTable::new(my_id, k);
+
+	// Insert <= k peers should succeed
+	rt.insert(make_node(1, 4001, 0x01));
+	rt.insert(make_node(2, 4002, 0x02));
+	rt.insert(make_node(3, 4003, 0x03));
+	rt
+    }
+
     #[test]
     fn create_routing_table_and_insert_up_to_k() {
         let my_id = id_with_first_byte(0xAA);
@@ -222,35 +260,73 @@ mod test {
         let mut rt = RoutingTable::new(my_id, k);
 
         // Insert <= k peers should succeed
-        rt.insert(make_node(1, 4001, 0x01));
-        rt.insert(make_node(2, 4002, 0x02));
+	assert!(matches!(rt.insert(make_node(1, 4001, 0x01)), InsertResult::Inserted));
+	rt.insert(make_node(2, 4002, 0x02));
         rt.insert(make_node(3, 4003, 0x03));
 
+	// attempt to insert the same node info again; it should be a NOOP
+	assert!(matches!(rt.insert(make_node(1, 4001, 0x01)), InsertResult::AlreadyPresent));
+
         let all = rt.all_nodes();
-        assert_eq!(all.len(), 3, "should hold exactly k nodes before any split");
+        assert_eq!(all.len(), 3, "should hold exactly k nodes");
 
         assert_eq!(rt.count_buckets(), 1);
     }
 
     #[test]
-    fn bucket_splits_when_full_if_it_contains_our_prefix() {
-        let my_id = id_with_first_byte(0x80);
+    fn full_bucket_splits() {
+	let k = 3;
+	let mut rt = setup_full_bucket(k);
+        assert_eq!(rt.all_nodes().len(), 3, "should hold exactly k nodes before any split");
+
+        assert_eq!(rt.count_buckets(), 1);
+	let insert_result = rt.insert(make_node(3, 4003, 0x03));
+
+	assert!(matches!(insert_result, InsertResult::SplitOccurred));
+        assert_eq!(rt.all_nodes().len(), 4);
+        assert_eq!(rt.count_buckets(), 2);
+
+    }
+
+    #[test]
+    fn full_bucket_requires_probe() {
+        let my_id = id_with_first_byte(0xAA); // MSB = 1
         let k = 2;
         let mut rt = RoutingTable::new(my_id, k);
 
-        // Fill the root bucket
+	// Fill the root bucket (both are MSB=1 => near side)
         rt.insert(make_node(1, 4001, 0x80));
         rt.insert(make_node(2, 4002, 0x81));
         assert_eq!(rt.all_nodes().len(), 2);
 
-        // Next insert should trigger a split (since the root bucket contains our prefix),
-        // moving nodes into child buckets by the next bit.
-        rt.insert(make_node(3, 4003, 0x00));
+	// Next insert (MSB=0) should trigger a split (root contains our prefix)
+	let expected_lru = make_node(3, 4003, 0x00);
+        rt.insert(expected_lru);
 
-        // After split, total nodes unchanged + 1 new = 3
+        // After split, 3 nodes and 2 buckets
         assert_eq!(rt.all_nodes().len(), 3);
-
         assert_eq!(rt.count_buckets(), 2);
-        // Optionally assert tree shape here once you expose accessors to inspect it.
+
+
+	// Currently far bucket has one node (0x00). Add another MSB=0 to fill it to k=2.
+	rt.insert(make_node(4, 4004, 0x02));
+
+	//NeedsProbe{lru: NodeInfo, probe_id: ProbeID},
+
+	// Now insert yet another MSB=0 node; the far bucket is full and does NOT contain my_id,
+	// so this should not split. We expect a probe of the LRU instead.
+	let insert_result = rt.insert(make_node(5, 4005, 0x03));
+
+	match insert_result {
+	    // the lru should be the node we inserted first into this bucket
+	    // we ignore the random probe ID
+            InsertResult::NeedsProbe { lru, .. } => {
+		assert_eq!(lru, expected_lru, "LRU in far bucket should be the earliest far insert");
+            }
+            other => panic!("expected NeedsProbe, got: {:?}", other),
+	}
+
+	// Still only 2 buckets; no extra split happened.
+	assert_eq!(rt.count_buckets(), 2);
     }
 }

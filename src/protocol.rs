@@ -151,7 +151,7 @@ impl ProtocolManager {
 		    let mut expired = Vec::new();
 		    for (probe_id, pending) in pending.iter() {
 			if pending.deadline <= now {
-			    expired.push(probe_id);
+			    expired.push(*probe_id);
 			}
 		    }
 		    for probe_id in expired {
