@@ -1,8 +1,7 @@
 use std::net::IpAddr;
+use rand::Rng;
 
-use anyhow::bail;
-
-mod identifier;
+pub mod identifier;
 use identifier::NodeID;
 
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
@@ -67,11 +66,18 @@ enum BucketTree {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProbeID(u64);
 
-enum InsertResult{
+impl ProbeID {
+    pub fn random() -> Self {
+        let val: u64 = rand::rng().random();
+        Self(val)
+    }
+}
+
+pub enum InsertResult{
     Inserted,
     AlreadyPresent,
     NeedsProbe{lru: NodeInfo, probe_id: ProbeID},
-    SplitOccured
+    SplitOccurred
 }
 
 
@@ -116,29 +122,31 @@ impl RoutingTable {
         walk(&self.tree)
     }
 
-    // TODO: need a result type here
-    // Inserted
-    // Rejected
-    // NeedsProbe(peer) # ping the lru in a bucket
-    pub fn insert(&mut self, peer: NodeInfo) -> anyhow::Result<()> {
+    pub fn insert(&mut self, peer: NodeInfo) -> InsertResult {
         println!("{peer:?}");
         let mut current = &mut self.tree;
         loop {
             match current {
                 BucketTree::Bucket(ref mut bucket) => {
                     println!("bucket");
-                    if bucket.is_full() {
-                        if bucket.contains_id(self.my_id) {
-                            // if my id in bucket, then split
-                            println!("we need to split this bucket that contains our own node id");
-                        } else {
-                            // ping the lru and return a NeedsProbe result
-                            println!("We need to probe the LRU node in this full bucket to possibly replace")
-                        }
-                    } else {
-                        bucket.insert(peer);
-                    }
-                    break Ok(());
+		    let result: InsertResult = {
+			if bucket.is_full() {
+                            if bucket.contains_id(self.my_id) {
+				// if my id in bucket, then split
+				println!("we need to split this bucket that contains our own node id");
+				// TODO: do split
+				InsertResult::SplitOccurred
+                            } else {
+				// ping the lru and return a NeedsProbe result
+				println!("We need to probe the LRU node in this full bucket to possibly replace");
+				InsertResult::NeedsProbe{lru: NodeInfo, probe_id: ProbeID}
+                            }
+			} else {
+                            bucket.insert(peer);
+			    InsertResult::Inserted
+			}
+		    };
+                    break result;
                 }
                 BucketTree::Branch {
                     bit_index,
@@ -155,6 +163,12 @@ impl RoutingTable {
                 }
             }
         }
+    }
+
+    /// a probe either came back alive, or it timed out
+    /// If alive, we keep the lru entry in the bucket and update its status.
+    /// If dead, then we remove it from the bucket and complete the original insertion
+    pub fn resolve_probe(&mut self, probe_id: ProbeID, alive: bool) {
     }
 }
 
