@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use rand::Rng;
 
+
 pub mod identifier;
 use identifier::NodeID;
 
@@ -18,13 +19,16 @@ pub struct NodeInfo {
 #[derive(Debug)]
 struct KBucket {
     k: usize,
-    //pub range: (NodeID, NodeID),  // inclusive low, exclusive high
+    depth: usize, // number of prefix bits fixed to get to this bucket
+    prefix: Option<NodeID>, // only top `self.depth` bits are meaningful
     node_infos: Vec<NodeInfo>, // TODO: LRU
 }
 impl KBucket {
-    pub fn new(k: usize) -> Self {
+    pub fn new(k: usize, depth: usize, prefix: Option<NodeID>) -> Self {
         Self {
             k,
+	    depth,
+	    prefix,
             node_infos: Vec::with_capacity(k),
         }
     }
@@ -41,16 +45,24 @@ impl KBucket {
         self.node_infos.push(info);
     }
 
-    /*
-    pub fn contains_range(&self, id: NodeID) -> bool {
-        let (low, high) = self.range;
-        id >= low && id < high
-    }
-    */
+    /// Returns true if the given `id` falls within the *range of IDs* this bucket covers.
+    ///
+    /// Each bucket is defined by `(prefix, depth)`:
+    ///   - `depth` = how many leading bits of the ID are fixed to reach this bucket
+    ///   - `prefix` = those leading bits (with the rest ignored)
+    ///
+    /// An `id` is considered "covered" if its first `depth` bits match `prefix`.
+    /// This does **not** mean the `id` is one of the peers actually stored in
+    /// `node_infos`; it only checks if the ID lies in the numeric range represented
+    /// by this bucket.
+    fn covers(&self, id: NodeID) -> bool {
+        if self.depth == 0 {
+            return true; // root bucket covers whole space
+        }
 
-    pub fn contains_id(&self, search_id: NodeID) -> bool {
-        self.node_infos.iter().any(|info| info.node_id == search_id)
+	id.prefix_bits(self.depth) == self.prefix.expect("prefix must exist when depth > 0").prefix_bits(self.depth)
     }
+
 
     /// Returns a mutable reference to the entry with this NodeID, if present.
     pub fn find_mut(&mut self, id: NodeID) -> Option<&mut NodeInfo> {
@@ -104,9 +116,10 @@ pub struct RoutingTable {
 
 impl RoutingTable {
     pub fn new(my_id: NodeID, k: usize) -> Self {
+	// the root bucket has 0 depth and no prefix
         Self {
             my_id,
-            tree: BucketTree::Bucket(KBucket::new(k)),
+            tree: BucketTree::Bucket(KBucket::new(k, 0, None)),
         }
     }
 
@@ -157,7 +170,7 @@ impl RoutingTable {
 			    }
 			}
 			else if bucket.is_full() {
-                            if bucket.contains_id(self.my_id) {
+                            if bucket.covers(self.my_id) {
 				// if my id in bucket, then split
 				// TODO: actually just check for range, not literal membership
 				println!("we need to split this bucket that contains our own node id");
@@ -227,12 +240,13 @@ impl Node {
 mod test {
     use super::*;
     use std::net::Ipv4Addr;
+    use ethereum_types::H160;
 
     /// Make a NodeID with a specific leading byte and the rest zero.
     fn id_with_first_byte(b: u8) -> NodeID {
         let mut id = [0u8; 20];
         id[0] = b;
-        NodeID(id)
+        NodeID(H160::from(id))
     }
 
     /// Helper function for making a test node
@@ -283,8 +297,9 @@ mod test {
         assert_eq!(rt.all_nodes().len(), 3, "should hold exactly k nodes before any split");
 
         assert_eq!(rt.count_buckets(), 1);
-	let insert_result = rt.insert(make_node(3, 4003, 0x03));
+	let insert_result = rt.insert(make_node(4, 4004, 0x04));
 
+	dbg!(insert_result);
 	assert!(matches!(insert_result, InsertResult::SplitOccurred));
         assert_eq!(rt.all_nodes().len(), 4);
         assert_eq!(rt.count_buckets(), 2);
