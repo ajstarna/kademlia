@@ -68,7 +68,7 @@ impl NodeID {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub ip_address: IpAddr,
     pub udp_port: u16,

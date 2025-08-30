@@ -31,10 +31,12 @@ enum Message {
         node_id: NodeID,
         target: NodeID,
     },
+    Nodes { node_id: NodeID, nodes: Vec<NodeInfo> },
     FindValue {
         node_id: NodeID,
         key: Key,
     },
+    ValueFound { node_id: NodeID, key: Key, value: Value },
 }
 
 pub struct ProtocolManager {
@@ -90,7 +92,7 @@ impl ProtocolManager {
         }
     }
 
-    async fn handle_message(&mut self, msg: Message, src_addr: SocketAddr) -> anyhow::Result<()> {
+    async fn handle_message(&mut self, msg: Message, src_addr: SocketAddr) -> anyhow::Result<Vec<Effect>> {
         match msg {
             Message::Ping { node_id } => {
                 println!("Received Ping from {node_id:?}");
@@ -187,4 +189,42 @@ impl ProtocolManager {
             }
         }
     }
+}
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_ping_adds_peer_and_returns_pong() {
+	let mut pm = ProtocolManager::new(Node::new());
+	let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+	let peer_id = NodeID::new();
+
+	// Send Ping
+	let msg = Message::Ping { node_id: peer_id };
+	let effects = futures::executor::block_on(pm.handle_message(msg, src)).unwrap();
+
+	// 1. Check routing table contains the peer
+	let inserted = pm.node.routing_table.find_mut(peer_id);
+	assert!(inserted.is_some(), "peer should be added to routing table");
+
+	// 2. Check Pong effect is returned to the right address
+	let pong_effects: Vec<_> = effects.into_iter().filter_map(|e| match e {
+            Effect::Send { addr, bytes } => Some((addr, bytes)),
+            _ => None,
+	}).collect();
+
+	assert_eq!(pong_effects.len(), 1);
+	assert_eq!(pong_effects[0].0, src);
+
+	// Optionally: deserialize pong_effects[0].1 into Message and assert it’s Pong
+	let pong: Message = rmp_serde::from_slice(&pong_effects[0].1).unwrap();
+	match pong {
+            Message::Pong { node_id } => assert_eq!(node_id, pm.node.my_info.node_id),
+            _ => panic!("expected Pong, got {:?}", pong),
+	}
+    }
+
 }
