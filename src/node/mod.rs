@@ -1,11 +1,13 @@
 use std::net::IpAddr;
-use rand::Rng;
 
 
 pub mod identifier;
 pub mod storage;
+pub mod routing_table;
 
-use identifier::NodeID;
+use identifier::{NodeID, NodeInfo};
+use routing_table::RoutingTable;
+use storage::Storage;
 
 
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
@@ -30,6 +32,7 @@ impl Node {
         Self {
             my_info,
             routing_table: RoutingTable::new(my_id, k),
+	    storage: Storage::new(),
         }
     }
 }

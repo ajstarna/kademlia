@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use ethereum_types::H160;
 
 use serde::{Deserialize, Serialize};

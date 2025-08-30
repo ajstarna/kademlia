@@ -6,11 +6,12 @@ use tokio::time::{interval, Duration, MissedTickBehavior};
 use std::time::Instant;
 use std::collections::HashMap;
 use crate::{
-    node::identifier::{Key, NodeID},
-    node::{InsertResult, Node, NodeInfo, ProbeID},
+    node::identifier::{Key, NodeID, NodeInfo},
+    node::Node,
+    node::routing_table::{InsertResult, ProbeID},
+    node::storage::Value,
 };
 
-type Value = Vec<u8>;
 
 // each message type includes the NodeID of the sender
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,6 +80,7 @@ impl ProtocolManager {
 		}
 		other => break other,
 	    }
+	}
     }
 
     async fn handle_message(&mut self, msg: Message, src_addr: SocketAddr) -> anyhow::Result<()> {
