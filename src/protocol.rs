@@ -67,8 +67,18 @@ impl ProtocolManager {
             udp_port: src_addr.port(),       // use observed source port (NAT-friendly)
             node_id,
         };
-        let insert_result = self.node.routing_table.insert(peer);
-	insert_result
+
+	loop {
+	    match self.node.routing_table.try_insert(peer) {
+		InsertResult::SplitOccurred => {
+		    // Keep looping until a split does not happen.
+		    // It is possible (though extremely unlikely) that even though we split the leaf bucket,
+		    // all existing nodes got moved to the same new bucket, and therefore we need to
+		    // continue splitting.
+		    continue;
+		}
+		other => break other,
+	    }
     }
 
     async fn handle_message(&mut self, msg: Message, src_addr: SocketAddr) -> anyhow::Result<()> {

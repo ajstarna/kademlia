@@ -47,6 +47,33 @@ impl NodeID {
         }
         acc
     }
+
+    /// create a copy of this NodeID but with a given bit set to a given value.
+    /// Useful when splitting buckets and assigning the new buckets' prefixes.
+    pub fn with_bit(&self, bit_index: usize, bit: u8) -> Self {
+        //let mut bytes: [u8; 20] = (*self.0.as_bytes()).clone();
+	let mut bytes: [u8; 20] = *self.0.as_fixed_bytes();
+
+        let byte_index = bit_index / 8;
+        let bit_within_byte = bit_index % 8;
+        let shift_amount = 7 - bit_within_byte;
+
+        if bit == 1 {
+            bytes[byte_index] |= 1 << shift_amount;
+        } else {
+            bytes[byte_index] &= !(1 << shift_amount);
+        }
+
+        NodeID(H160::from(bytes))
+
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeInfo {
+    pub ip_address: IpAddr,
+    pub udp_port: u16,
+    pub node_id: NodeID,
 }
 
 
