@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use super::identifier::{NodeID, NodeInfo};
 use rand::Rng;
 
@@ -6,7 +8,7 @@ struct KBucket {
     k: usize,
     depth: usize,              // number of prefix bits fixed to get to this bucket
     prefix: Option<NodeID>,    // only top `self.depth` bits are meaningful
-    node_infos: Vec<NodeInfo>, // TODO: LRU
+    node_infos: VecDeque<NodeInfo>, // LRU peer is at the back of the vecdeque
 }
 
 impl KBucket {
@@ -15,7 +17,7 @@ impl KBucket {
             k,
             depth,
             prefix,
-            node_infos: Vec::with_capacity(k),
+            node_infos: VecDeque::with_capacity(k),
         }
     }
 
@@ -26,7 +28,7 @@ impl KBucket {
             k: 42,
             depth: 9,
             prefix: None,
-            node_infos: Vec::new(),
+            node_infos: VecDeque::new(),
         }
     }
 
@@ -34,12 +36,38 @@ impl KBucket {
         self.node_infos.len() >= self.k
     }
 
-    pub fn insert(&mut self, info: NodeInfo) {
+    pub fn try_insert(&mut self, info: NodeInfo) {
         if self.node_infos.len() >= self.k {
             // we should not even be calling this
             unreachable!("Cannot insert into a full K bucket!");
         }
-        self.node_infos.push(info);
+        self.node_infos.push_front(info);
+    }
+
+
+    /// Insert or update a peer
+    /// If it exists, we update its info.
+    /// If the bucket is full, we signal for a probe on the LRU peer, else we add to the front as the new MRU
+    pub fn upsert(&mut self, peer: NodeInfo) -> InsertResult {
+	println!("upserting: {peer:?}");
+	println!("{self:?}\n");
+
+        if let Some(existing) = self.find_mut(peer.node_id) {
+            if *existing == peer {
+                InsertResult::AlreadyPresent
+            } else {
+                existing.ip_address = peer.ip_address;
+                existing.udp_port = peer.udp_port;
+                InsertResult::Updated
+            }
+        } else if self.is_full() {
+            // return NeedsProbe with the eviction candidate
+            let lru = self.node_infos.back().unwrap().clone();
+            InsertResult::Full { lru }
+        } else {
+            self.node_infos.push_front(peer); // or whatever LRU policy you decide
+            InsertResult::Inserted
+        }
     }
 
     /// Returns true if the given `id` falls within the *range of IDs* this bucket covers.
@@ -114,11 +142,11 @@ fn split_bucket(bucket: KBucket, k: usize) -> (Box<BucketTree>, Box<BucketTree>,
     let mut one_bucket = KBucket::new(k, new_depth, one_prefix);
 
     // Redistribute nodes
-    for node in bucket.node_infos {
+    for node in bucket.node_infos.into_iter().rev() {
         if node.node_id.get_bit_at(bit_index) == 0 {
-            zero_bucket.node_infos.push(node);
+            zero_bucket.upsert(node);
         } else {
-            one_bucket.node_infos.push(node);
+            one_bucket.upsert(node);
         }
     }
 
@@ -149,6 +177,7 @@ pub enum InsertResult {
     AlreadyPresent, // exact nodeinfo already exists
     Updated,        // The node_id existed but with different contact info
     NeedsProbe { lru: NodeInfo, probe_id: ProbeID },
+    Full { lru: NodeInfo }, // a bucket can say it is full and give the lru in case a probe is needed
     SplitOccurred,
 }
 
@@ -244,42 +273,26 @@ impl RoutingTable {
         my_id: NodeID,
         k: usize,
     ) -> (BucketTree, InsertResult) {
-        // Case 1: node already exists
-        if let Some(existing) = bucket.find_mut(peer.node_id) {
-            if *existing == peer {
-                return (BucketTree::Bucket(bucket), InsertResult::AlreadyPresent);
-            } else {
-                existing.ip_address = peer.ip_address;
-                existing.udp_port = peer.udp_port;
-                return (BucketTree::Bucket(bucket), InsertResult::Updated);
-            }
-        }
 
-        // Case 2: full bucket
-        if bucket.is_full() {
-            if bucket.covers(my_id) {
-                let (zero, one, bit_index) = split_bucket(bucket, k);
-                return (
-                    BucketTree::Branch {
-                        bit_index,
-                        zero,
-                        one,
-                    },
-                    InsertResult::SplitOccurred,
-                );
-            } else {
-                let lru = bucket.node_infos.last().cloned().unwrap();
-                let probe_id = ProbeID::new_random();
-                return (
-                    BucketTree::Bucket(bucket),
-                    InsertResult::NeedsProbe { lru, probe_id },
-                );
-            }
-        }
+        let result = bucket.upsert(peer);
+	match result {
+	    InsertResult::Full { lru } => {
+		if bucket.covers(my_id) {
+		    // split the bucket
+		    println!("lets split");
+		    let (zero, one, bit_index) = split_bucket(bucket, k);
+		    let new_tree = BucketTree::Branch { bit_index, zero, one };
+		    (new_tree, InsertResult::SplitOccurred)
+		} else {
+		    let probe_id = ProbeID::new_random();
+		    (BucketTree::Bucket(bucket), InsertResult::NeedsProbe{ lru, probe_id })
+		}
+	    }
+	    _ => {
+		(BucketTree::Bucket(bucket), result)
+	    }
+	}
 
-        // Case 3: not full → insert
-        bucket.insert(peer);
-        (BucketTree::Bucket(bucket), InsertResult::Inserted)
     }
 
     /// a probe either came back alive, or it timed out

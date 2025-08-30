@@ -59,17 +59,6 @@ enum Effect {
     },
 }
 
-/// HandleResult is the combined output of `handle_message`.
-///
-/// It returns both:
-/// - the `InsertResult` from attempting to update the routing table
-/// - and any `Effect` that should be executed by the main loop
-///
-/// This keeps routing decisions and networking actions unified, while
-/// still separating concerns: routing-table logic doesn’t send packets
-/// itself, but it can request that the manager do so.
-type HandleResult = (Vec<Effect>, Option<InsertResult>);
-
 struct PendingProbe {
     peer: SocketAddr,
     deadline: Instant,
