@@ -13,7 +13,9 @@ pub struct Storage {
 
 impl Storage {
     pub fn new() -> Self {
-        Storage { map: HashMap::new() }
+        Storage {
+            map: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, key: Key, value: Value) {

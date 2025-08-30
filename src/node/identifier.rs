@@ -1,5 +1,5 @@
-use std::net::IpAddr;
 use ethereum_types::H160;
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -13,13 +13,12 @@ impl Key {
         let mut hasher = Sha1::new();
         hasher.update(input.as_ref());
         let digest = hasher.finalize();
-	Self(H160::from_slice(&digest))
+        Self(H160::from_slice(&digest))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeID(pub H160);
-
 
 impl NodeID {
     /// randomly generate a new ID
@@ -53,7 +52,7 @@ impl NodeID {
     /// Useful when splitting buckets and assigning the new buckets' prefixes.
     pub fn with_bit(&self, bit_index: usize, bit: u8) -> Self {
         //let mut bytes: [u8; 20] = (*self.0.as_bytes()).clone();
-	let mut bytes: [u8; 20] = *self.0.as_fixed_bytes();
+        let mut bytes: [u8; 20] = *self.0.as_fixed_bytes();
 
         let byte_index = bit_index / 8;
         let bit_within_byte = bit_index % 8;
@@ -66,7 +65,6 @@ impl NodeID {
         }
 
         NodeID(H160::from(bytes))
-
     }
 }
 
@@ -76,7 +74,6 @@ pub struct NodeInfo {
     pub udp_port: u16,
     pub node_id: NodeID,
 }
-
 
 #[cfg(test)]
 mod test {

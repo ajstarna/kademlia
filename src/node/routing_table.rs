@@ -1,13 +1,11 @@
+use super::identifier::{NodeID, NodeInfo};
 use rand::Rng;
-use super::identifier::{NodeInfo, NodeID};
-
-
 
 #[derive(Debug)]
 struct KBucket {
     k: usize,
-    depth: usize, // number of prefix bits fixed to get to this bucket
-    prefix: Option<NodeID>, // only top `self.depth` bits are meaningful
+    depth: usize,              // number of prefix bits fixed to get to this bucket
+    prefix: Option<NodeID>,    // only top `self.depth` bits are meaningful
     node_infos: Vec<NodeInfo>, // TODO: LRU
 }
 
@@ -15,8 +13,8 @@ impl KBucket {
     pub fn new(k: usize, depth: usize, prefix: Option<NodeID>) -> Self {
         Self {
             k,
-	    depth,
-	    prefix,
+            depth,
+            prefix,
             node_infos: Vec::with_capacity(k),
         }
     }
@@ -24,21 +22,21 @@ impl KBucket {
     /// Make a dummy bucket. Useful for rust ownership purposes when traversing
     /// and modifying the routing table.
     pub fn dummy() -> Self {
-	Self {
-	    k: 42,
-	    depth: 9,
-	    prefix: None,
-	    node_infos: Vec::new(),
-	}
+        Self {
+            k: 42,
+            depth: 9,
+            prefix: None,
+            node_infos: Vec::new(),
+        }
     }
 
     pub fn is_full(&self) -> bool {
         self.node_infos.len() >= self.k
     }
 
-    pub fn insert(&mut self, info: NodeInfo){
+    pub fn insert(&mut self, info: NodeInfo) {
         if self.node_infos.len() >= self.k {
-	    // we should not even be calling this
+            // we should not even be calling this
             unreachable!("Cannot insert into a full K bucket!");
         }
         self.node_infos.push(info);
@@ -59,9 +57,12 @@ impl KBucket {
             return true; // root bucket covers whole space
         }
 
-	id.prefix_bits(self.depth) == self.prefix.expect("prefix must exist when depth > 0").prefix_bits(self.depth)
+        id.prefix_bits(self.depth)
+            == self
+                .prefix
+                .expect("prefix must exist when depth > 0")
+                .prefix_bits(self.depth)
     }
-
 
     /// Returns a mutable reference to the entry with this NodeID, if present.
     pub fn find_mut(&mut self, id: NodeID) -> Option<&mut NodeInfo> {
@@ -92,7 +93,7 @@ enum BucketTree {
 ///
 /// Note: the peer that triggered the split must be inserted afterwards.
 fn split_bucket(bucket: KBucket, k: usize) -> (Box<BucketTree>, Box<BucketTree>, usize) {
-    let bit_index = bucket.depth;       // split on the next bit
+    let bit_index = bucket.depth; // split on the next bit
     let new_depth = bit_index + 1;
 
     // Build child prefixes
@@ -110,7 +111,7 @@ fn split_bucket(bucket: KBucket, k: usize) -> (Box<BucketTree>, Box<BucketTree>,
 
     // Create the two new buckets
     let mut zero_bucket = KBucket::new(k, new_depth, zero_prefix);
-    let mut one_bucket  = KBucket::new(k, new_depth, one_prefix);
+    let mut one_bucket = KBucket::new(k, new_depth, one_prefix);
 
     // Redistribute nodes
     for node in bucket.node_infos {
@@ -128,7 +129,6 @@ fn split_bucket(bucket: KBucket, k: usize) -> (Box<BucketTree>, Box<BucketTree>,
     )
 }
 
-
 /// The ID corresponding to an attempted insert on a full K bucket.
 /// A probe is sent out to the LRU, and if they do not respond in time,
 /// then we boot them from the bucket and finish the new insertion.
@@ -144,14 +144,13 @@ impl ProbeID {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InsertResult{
-    Inserted,  // normal insertion
+pub enum InsertResult {
+    Inserted,       // normal insertion
     AlreadyPresent, // exact nodeinfo already exists
-    Updated, // The node_id existed but with different contact info
-    NeedsProbe{lru: NodeInfo, probe_id: ProbeID},
-    SplitOccurred
+    Updated,        // The node_id existed but with different contact info
+    NeedsProbe { lru: NodeInfo, probe_id: ProbeID },
+    SplitOccurred,
 }
-
 
 #[derive(Debug)]
 pub struct RoutingTable {
@@ -162,16 +161,16 @@ pub struct RoutingTable {
 
 impl RoutingTable {
     pub fn new(my_id: NodeID, k: usize) -> Self {
-	// the root bucket has 0 depth and no prefix
+        // the root bucket has 0 depth and no prefix
         Self {
             my_id,
-	    k,
+            k,
             tree: BucketTree::Bucket(KBucket::new(k, 0, None)),
         }
     }
 
     /// Collect every NodeInfo in the tree. Handy for tests and simple impls.
-    fn all_nodes(& self) -> Vec<& NodeInfo> {
+    fn all_nodes(&self) -> Vec<&NodeInfo> {
         fn walk<'a>(t: &'a BucketTree, out: &mut Vec<&'a NodeInfo>) {
             match t {
                 BucketTree::Bucket(b) => out.extend(b.node_infos.iter()),
@@ -200,31 +199,36 @@ impl RoutingTable {
     pub fn try_insert(&mut self, peer: NodeInfo) -> InsertResult {
         let mut current = &mut self.tree;
 
-	loop {
+        loop {
             match current {
-		BucketTree::Bucket(_) => {
-		    // We replace the current bucket with a dummy bucket for now.
-		    // handle_bucket() returns the new_tree to put back in place.
-                    let old_bucket = std::mem::replace(current, BucketTree::Bucket(KBucket::dummy()));
+                BucketTree::Bucket(_) => {
+                    // We replace the current bucket with a dummy bucket for now.
+                    // handle_bucket() returns the new_tree to put back in place.
+                    let old_bucket =
+                        std::mem::replace(current, BucketTree::Bucket(KBucket::dummy()));
                     if let BucketTree::Bucket(bucket) = old_bucket {
-			let (new_tree, result) = RoutingTable::handle_bucket(bucket, peer, self.my_id, self.k);
-			*current = new_tree;
-			return result;
+                        let (new_tree, result) =
+                            RoutingTable::handle_bucket(bucket, peer, self.my_id, self.k);
+                        *current = new_tree;
+                        return result;
                     } else {
-			unreachable!("old_bucket must be a KBucket");
+                        unreachable!("old_bucket must be a KBucket");
                     }
-		}
-		BucketTree::Branch { bit_index, zero, one } => {
+                }
+                BucketTree::Branch {
+                    bit_index,
+                    zero,
+                    one,
+                } => {
                     current = if peer.node_id.get_bit_at(*bit_index) == 0 {
-			zero
+                        zero
                     } else {
-			one
+                        one
                     };
-		}
+                }
             }
-	}
+        }
     }
-
 
     /// Once we have found the proper leaf bucket during an attempted insertion,
     /// we enter this method.
@@ -234,53 +238,61 @@ impl RoutingTable {
     /// Returns the BucketTree to put back in the overall Routing tree
     ///  - can just be the same bucket, or sometimes it will be a branch to split buckets
     /// and returns the InsertResult of what occured.
-    fn handle_bucket(mut bucket: KBucket, peer: NodeInfo, my_id: NodeID, k: usize)
-		     -> (BucketTree, InsertResult)
-    {
-	// Case 1: node already exists
-	if let Some(existing) = bucket.find_mut(peer.node_id) {
+    fn handle_bucket(
+        mut bucket: KBucket,
+        peer: NodeInfo,
+        my_id: NodeID,
+        k: usize,
+    ) -> (BucketTree, InsertResult) {
+        // Case 1: node already exists
+        if let Some(existing) = bucket.find_mut(peer.node_id) {
             if *existing == peer {
-		return (BucketTree::Bucket(bucket), InsertResult::AlreadyPresent);
+                return (BucketTree::Bucket(bucket), InsertResult::AlreadyPresent);
             } else {
-		existing.ip_address = peer.ip_address;
-		existing.udp_port = peer.udp_port;
-		return (BucketTree::Bucket(bucket), InsertResult::Updated);
+                existing.ip_address = peer.ip_address;
+                existing.udp_port = peer.udp_port;
+                return (BucketTree::Bucket(bucket), InsertResult::Updated);
             }
-	}
+        }
 
-	// Case 2: full bucket
-	if bucket.is_full() {
+        // Case 2: full bucket
+        if bucket.is_full() {
             if bucket.covers(my_id) {
-		let (zero, one, bit_index) = split_bucket(bucket, k);
-		return (
-                    BucketTree::Branch { bit_index, zero, one },
+                let (zero, one, bit_index) = split_bucket(bucket, k);
+                return (
+                    BucketTree::Branch {
+                        bit_index,
+                        zero,
+                        one,
+                    },
                     InsertResult::SplitOccurred,
-		);
+                );
             } else {
-		let lru = bucket.node_infos.last().cloned().unwrap();
-		let probe_id = ProbeID::new_random();
-		return (BucketTree::Bucket(bucket), InsertResult::NeedsProbe { lru, probe_id });
+                let lru = bucket.node_infos.last().cloned().unwrap();
+                let probe_id = ProbeID::new_random();
+                return (
+                    BucketTree::Bucket(bucket),
+                    InsertResult::NeedsProbe { lru, probe_id },
+                );
             }
-	}
+        }
 
-	// Case 3: not full → insert
-	bucket.insert(peer);
-	(BucketTree::Bucket(bucket), InsertResult::Inserted)
+        // Case 3: not full → insert
+        bucket.insert(peer);
+        (BucketTree::Bucket(bucket), InsertResult::Inserted)
     }
 
     /// a probe either came back alive, or it timed out
     /// If alive, we keep the lru entry in the bucket and update its status.
     /// If dead, then we remove it from the bucket and complete the original insertion
-    pub fn resolve_probe(&mut self, probe_id: ProbeID, alive: bool) {
-    }
-
+    pub fn resolve_probe(&mut self, probe_id: ProbeID, alive: bool) {}
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
     use ethereum_types::H160;
+    use std::net::{IpAddr, Ipv4Addr};
 
     /// Make a NodeID with a specific leading byte and the rest zero.
     fn id_with_first_byte(b: u8) -> NodeID {
@@ -298,21 +310,26 @@ mod test {
         }
     }
 
-
     #[test]
     fn create_routing_table_and_insert_up_to_k() {
         let my_id = id_with_first_byte(0xAA);
-	println!("{my_id:?}");
+        println!("{my_id:?}");
         let k = 3;
         let mut rt = RoutingTable::new(my_id, k);
 
         // Insert <= k peers should succeed
-	assert!(matches!(rt.try_insert(make_peer(1, 4001, 0x01)), InsertResult::Inserted));
-	rt.try_insert(make_peer(2, 4002, 0x02));
+        assert!(matches!(
+            rt.try_insert(make_peer(1, 4001, 0x01)),
+            InsertResult::Inserted
+        ));
+        rt.try_insert(make_peer(2, 4002, 0x02));
         rt.try_insert(make_peer(3, 4003, 0x03));
 
-	// attempt to insert the same node info again; it should be a NOOP
-	assert!(matches!(rt.try_insert(make_peer(1, 4001, 0x01)), InsertResult::AlreadyPresent));
+        // attempt to insert the same node info again; it should be a NOOP
+        assert!(matches!(
+            rt.try_insert(make_peer(1, 4001, 0x01)),
+            InsertResult::AlreadyPresent
+        ));
 
         let all = rt.all_nodes();
         assert_eq!(all.len(), 3, "should hold exactly k nodes");
@@ -322,40 +339,43 @@ mod test {
 
     #[test]
     fn full_bucket_splits() {
-	let my_id: NodeID = id_with_first_byte(0xAA);
-	let mut rt: RoutingTable = RoutingTable::new(my_id, 3);
+        let my_id: NodeID = id_with_first_byte(0xAA);
+        let mut rt: RoutingTable = RoutingTable::new(my_id, 3);
 
-	// Insert <= k peers should succeed
+        // Insert <= k peers should succeed
 
-	// the first two starts with 0
-	rt.try_insert(make_peer(1, 4001, 0x01));
-	rt.try_insert(make_peer(2, 4002, 0x02));
+        // the first two starts with 0
+        rt.try_insert(make_peer(1, 4001, 0x01));
+        rt.try_insert(make_peer(2, 4002, 0x02));
 
-	// the third peer starts with a 1 bit, so it will end up in a different bucket when we split
-	rt.try_insert(make_peer(3, 4003, 0x83));
+        // the third peer starts with a 1 bit, so it will end up in a different bucket when we split
+        rt.try_insert(make_peer(3, 4003, 0x83));
 
-        assert_eq!(rt.all_nodes().len(), 3, "should hold exactly k nodes before any split");
+        assert_eq!(
+            rt.all_nodes().len(),
+            3,
+            "should hold exactly k nodes before any split"
+        );
 
         assert_eq!(rt.count_buckets(), 1);
 
-	// the first time there is a split triggered
-	let insert_result = rt.try_insert(make_peer(4, 4004, 0x04));
-	assert!(matches!(insert_result, InsertResult::SplitOccurred));
+        // the first time there is a split triggered
+        let insert_result = rt.try_insert(make_peer(4, 4004, 0x04));
+        assert!(matches!(insert_result, InsertResult::SplitOccurred));
         assert_eq!(rt.all_nodes().len(), 3);
 
-	let nodes = rt.all_nodes();
-	println!("{nodes:?}");
+        let nodes = rt.all_nodes();
+        println!("{nodes:?}");
 
-	// the second bucket is ready to go
+        // the second bucket is ready to go
         assert_eq!(rt.count_buckets(), 2);
 
-	// try again, and this time it will be there
-	let insert_result = rt.try_insert(make_peer(4, 4004, 0x04));
-	println!("{insert_result:?}");
-	print!("{rt:?}");
-	assert!(matches!(insert_result, InsertResult::Inserted));
+        // try again, and this time it will be there
+        let insert_result = rt.try_insert(make_peer(4, 4004, 0x04));
+        println!("{insert_result:?}");
+        print!("{rt:?}");
+        assert!(matches!(insert_result, InsertResult::Inserted));
         assert_eq!(rt.all_nodes().len(), 4);
-
     }
 
     #[test]
@@ -364,41 +384,50 @@ mod test {
         let k = 2;
         let mut rt = RoutingTable::new(my_id, k);
 
-	// Fill the root bucket (both are MSB=1 => near side)
+        // Fill the root bucket (both are MSB=1 => near side)
         rt.try_insert(make_peer(1, 4001, 0x80));
         rt.try_insert(make_peer(2, 4002, 0x81));
         assert_eq!(rt.all_nodes().len(), 2);
 
-	// Next try_insert (MSB=0) should trigger a split (root contains our prefix)
-	let expected_lru = make_peer(3, 4003, 0x00);
-        assert!(matches!(rt.try_insert(expected_lru), InsertResult::SplitOccurred));
+        // Next try_insert (MSB=0) should trigger a split (root contains our prefix)
+        let expected_lru = make_peer(3, 4003, 0x00);
+        assert!(matches!(
+            rt.try_insert(expected_lru),
+            InsertResult::SplitOccurred
+        ));
 
         // After split, still 2 nodes but now 2 buckets
         assert_eq!(rt.all_nodes().len(), 2);
         assert_eq!(rt.count_buckets(), 2);
 
-	// now insert it for real
-        assert!(matches!(rt.try_insert(expected_lru), InsertResult::Inserted));
+        // now insert it for real
+        assert!(matches!(
+            rt.try_insert(expected_lru),
+            InsertResult::Inserted
+        ));
 
         assert_eq!(rt.all_nodes().len(), 3);
 
-	// Currently far bucket has one node (0x00). Add another MSB=0 to fill it to k=2.
-	rt.try_insert(make_peer(4, 4004, 0x02));
+        // Currently far bucket has one node (0x00). Add another MSB=0 to fill it to k=2.
+        rt.try_insert(make_peer(4, 4004, 0x02));
 
-	// Now insert yet another MSB=0 node; the far bucket is full and does NOT contain my_id,
-	// so this should not split. We expect a probe of the LRU instead.
-	let insert_result = rt.try_insert(make_peer(5, 4005, 0x03));
+        // Now insert yet another MSB=0 node; the far bucket is full and does NOT contain my_id,
+        // so this should not split. We expect a probe of the LRU instead.
+        let insert_result = rt.try_insert(make_peer(5, 4005, 0x03));
 
-	match insert_result {
-	    // the lru should be the node we inserted first into this bucket
-	    // we ignore the random probe ID
+        match insert_result {
+            // the lru should be the node we inserted first into this bucket
+            // we ignore the random probe ID
             InsertResult::NeedsProbe { lru, .. } => {
-		assert_eq!(lru, expected_lru, "LRU in far bucket should be the earliest far insert");
+                assert_eq!(
+                    lru, expected_lru,
+                    "LRU in far bucket should be the earliest far insert"
+                );
             }
             other => panic!("expected NeedsProbe, got: {:?}", other),
-	}
+        }
 
-	// Still only 2 buckets; no extra split happened.
-	assert_eq!(rt.count_buckets(), 2);
+        // Still only 2 buckets; no extra split happened.
+        assert_eq!(rt.count_buckets(), 2);
     }
 }
