@@ -49,6 +49,7 @@ pub struct ProtocolManager {
 ///
 /// It decouples pure routing-table logic (insertions, probes, splits, etc.)
 /// from I/O side effects (sending a Pong, starting a probe, etc.).
+#[derive(Debug)]
 enum Effect {
     Send {
         addr: SocketAddr,
@@ -93,6 +94,7 @@ impl ProtocolManager {
     }
 
     async fn handle_message(&mut self, msg: Message, src_addr: SocketAddr) -> anyhow::Result<Vec<Effect>> {
+	let mut effects = Vec::new();
         match msg {
             Message::Ping { node_id } => {
                 println!("Received Ping from {node_id:?}");
@@ -101,7 +103,11 @@ impl ProtocolManager {
                     node_id: self.node.my_info.node_id,
                 };
                 let bytes = rmp_serde::to_vec(&pong)?;
-                self.socket.send_to(&bytes, src_addr).await?;
+		effects.push(Effect::Send {
+		    addr: src_addr,
+		    bytes: bytes,
+		});
+                //self.socket.send_to(&bytes, src_addr).await?;
             }
 
             Message::Pong { node_id } => {
@@ -125,14 +131,20 @@ impl ProtocolManager {
                 self.observe_contact(src_addr, node_id);
                 // Find closest nodes to the given ID in your routing table
             }
+	    Message::Nodes { node_id, nodes } => {
+                self.observe_contact(src_addr, node_id);
+	    }
 
             Message::FindValue { node_id, key } => {
                 println!("FindValue request: key={key:?}");
                 self.observe_contact(src_addr, node_id);
                 // Lookup the value, or return closest nodes if not found
-            }
+            },
+	    Message::ValueFound { node_id, key, value } => {
+                self.observe_contact(src_addr, node_id);
+	    }
         }
-        Ok(())
+        Ok(effects)
     }
 
     /// This for messages in a loop, and respond accordingly
@@ -196,35 +208,35 @@ impl ProtocolManager {
 mod test {
     use super::*;
 
-    #[test]
-    fn test_ping_adds_peer_and_returns_pong() {
-	let mut pm = ProtocolManager::new(Node::new());
+
+    #[tokio::test]
+    async fn test_receive_ping() {
+	let node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
+	let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
+	let mut pm = ProtocolManager::new(node, dummy_socket);
+
+	let src_id = NodeID::new();
+	let msg = Message::Ping { node_id: src_id };
 	let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
-	let peer_id = NodeID::new();
 
-	// Send Ping
-	let msg = Message::Ping { node_id: peer_id };
-	let effects = futures::executor::block_on(pm.handle_message(msg, src)).unwrap();
+	let effects = pm.handle_message(msg, src).await.unwrap();
 
-	// 1. Check routing table contains the peer
-	let inserted = pm.node.routing_table.find_mut(peer_id);
-	assert!(inserted.is_some(), "peer should be added to routing table");
+	// make sure the addr that sent us the message is now in our table
+	assert!(pm.node.routing_table.find(src_id).is_some());
 
-	// 2. Check Pong effect is returned to the right address
-	let pong_effects: Vec<_> = effects.into_iter().filter_map(|e| match e {
-            Effect::Send { addr, bytes } => Some((addr, bytes)),
-            _ => None,
-	}).collect();
 
-	assert_eq!(pong_effects.len(), 1);
-	assert_eq!(pong_effects[0].0, src);
-
-	// Optionally: deserialize pong_effects[0].1 into Message and assert it’s Pong
-	let pong: Message = rmp_serde::from_slice(&pong_effects[0].1).unwrap();
-	match pong {
-            Message::Pong { node_id } => assert_eq!(node_id, pm.node.my_info.node_id),
-            _ => panic!("expected Pong, got {:?}", pong),
+	let effect = effects.into_iter().next().expect("there should be an effect");
+	match effect {
+	    Effect::Send { addr, bytes } => {
+		assert_eq!(addr, src);
+		let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
+		assert!(matches!(reply, Message::Pong { node_id } if node_id == pm.node.my_info.node_id));
+	    }
+	    _ => panic!("expected Send Pong effect, got {:?}", effect),
 	}
-    }
+
+}
+
+
 
 }

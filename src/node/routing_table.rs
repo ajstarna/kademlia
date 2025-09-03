@@ -96,6 +96,10 @@ impl KBucket {
     pub fn find_mut(&mut self, id: NodeID) -> Option<&mut NodeInfo> {
         self.node_infos.iter_mut().find(|n| n.node_id == id)
     }
+
+    pub fn find(&self, id: NodeID) -> Option<&NodeInfo> {
+        self.node_infos.iter().find(|n| n.node_id == id)
+    }
 }
 
 /// A binary tree whose leaves are K-buckets.
@@ -213,6 +217,41 @@ impl RoutingTable {
         walk(&self.tree, &mut v);
         v
     }
+
+
+    pub fn contains(&self, node_id: NodeID) -> bool {
+        self.find(node_id).is_some()
+    }
+
+    pub fn find(&self, node_id: NodeID) -> Option<&NodeInfo> {
+	fn walk<'a>(t: &'a BucketTree, node_id: NodeID) -> Option<&'a NodeInfo> {
+            match t {
+		BucketTree::Bucket(b) => b.find(node_id), // assume KBucket has a find
+		BucketTree::Branch { zero, one, .. } => {
+                    walk(zero, node_id).or_else(|| walk(one, node_id))
+		}
+            }
+	}
+	walk(&self.tree, node_id)
+    }
+
+
+    pub fn find_mut(&mut self, node_id: NodeID) -> Option<&mut NodeInfo> {
+	fn walk<'a>(t: &'a mut BucketTree, node_id: NodeID) -> Option<&'a mut NodeInfo> {
+            match t {
+		BucketTree::Bucket(b) => b.find_mut(node_id),
+		BucketTree::Branch { zero, one, .. } => {
+                    if let Some(found) = walk(zero, node_id) {
+			Some(found)
+                    } else {
+			walk(one, node_id)
+                    }
+		}
+            }
+	}
+	walk(&mut self.tree, node_id)
+    }
+
 
     /// return how many leaf k-buckets are store. maximum of 160, but likely far fewer
     fn count_buckets(&self) -> usize {
