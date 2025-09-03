@@ -31,12 +31,19 @@ enum Message {
         node_id: NodeID,
         target: NodeID,
     },
-    Nodes { node_id: NodeID, nodes: Vec<NodeInfo> },
+    Nodes {
+        node_id: NodeID,
+        nodes: Vec<NodeInfo>,
+    },
     FindValue {
         node_id: NodeID,
         key: Key,
     },
-    ValueFound { node_id: NodeID, key: Key, value: Value },
+    ValueFound {
+        node_id: NodeID,
+        key: Key,
+        value: Value,
+    },
 }
 
 pub struct ProtocolManager {
@@ -93,8 +100,12 @@ impl ProtocolManager {
         }
     }
 
-    async fn handle_message(&mut self, msg: Message, src_addr: SocketAddr) -> anyhow::Result<Vec<Effect>> {
-	let mut effects = Vec::new();
+    async fn handle_message(
+        &mut self,
+        msg: Message,
+        src_addr: SocketAddr,
+    ) -> anyhow::Result<Vec<Effect>> {
+        let mut effects = Vec::new();
         match msg {
             Message::Ping { node_id } => {
                 println!("Received Ping from {node_id:?}");
@@ -103,11 +114,10 @@ impl ProtocolManager {
                     node_id: self.node.my_info.node_id,
                 };
                 let bytes = rmp_serde::to_vec(&pong)?;
-		effects.push(Effect::Send {
-		    addr: src_addr,
-		    bytes: bytes,
-		});
-                //self.socket.send_to(&bytes, src_addr).await?;
+                effects.push(Effect::Send {
+                    addr: src_addr,
+                    bytes: bytes,
+                });
             }
 
             Message::Pong { node_id } => {
@@ -131,18 +141,22 @@ impl ProtocolManager {
                 self.observe_contact(src_addr, node_id);
                 // Find closest nodes to the given ID in your routing table
             }
-	    Message::Nodes { node_id, nodes } => {
+            Message::Nodes { node_id, nodes } => {
                 self.observe_contact(src_addr, node_id);
-	    }
+            }
 
             Message::FindValue { node_id, key } => {
                 println!("FindValue request: key={key:?}");
                 self.observe_contact(src_addr, node_id);
                 // Lookup the value, or return closest nodes if not found
-            },
-	    Message::ValueFound { node_id, key, value } => {
+            }
+            Message::ValueFound {
+                node_id,
+                key,
+                value,
+            } => {
                 self.observe_contact(src_addr, node_id);
-	    }
+            }
         }
         Ok(effects)
     }
@@ -203,40 +217,38 @@ impl ProtocolManager {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
 
-
     #[tokio::test]
     async fn test_receive_ping() {
-	let node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
-	let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-	let mut pm = ProtocolManager::new(node, dummy_socket);
+        let node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
+        let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
+        let mut pm = ProtocolManager::new(node, dummy_socket);
 
-	let src_id = NodeID::new();
-	let msg = Message::Ping { node_id: src_id };
-	let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        let src_id = NodeID::new();
+        let msg = Message::Ping { node_id: src_id };
+        let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
 
-	let effects = pm.handle_message(msg, src).await.unwrap();
+        let effects = pm.handle_message(msg, src).await.unwrap();
 
-	// make sure the addr that sent us the message is now in our table
-	assert!(pm.node.routing_table.find(src_id).is_some());
+        // make sure the addr that sent us the message is now in our table
+        assert!(pm.node.routing_table.find(src_id).is_some());
 
-
-	let effect = effects.into_iter().next().expect("there should be an effect");
-	match effect {
-	    Effect::Send { addr, bytes } => {
-		assert_eq!(addr, src);
-		let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
-		assert!(matches!(reply, Message::Pong { node_id } if node_id == pm.node.my_info.node_id));
-	    }
-	    _ => panic!("expected Send Pong effect, got {:?}", effect),
-	}
-
-}
-
-
-
+        let effect = effects
+            .into_iter()
+            .next()
+            .expect("there should be an effect");
+        match effect {
+            Effect::Send { addr, bytes } => {
+                assert_eq!(addr, src);
+                let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
+                assert!(
+                    matches!(reply, Message::Pong { node_id } if node_id == pm.node.my_info.node_id)
+                );
+            }
+            _ => panic!("expected Send Pong effect, got {:?}", effect),
+        }
+    }
 }

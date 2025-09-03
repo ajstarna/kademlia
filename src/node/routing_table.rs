@@ -6,8 +6,8 @@ use rand::Rng;
 #[derive(Debug)]
 struct KBucket {
     k: usize,
-    depth: usize,              // number of prefix bits fixed to get to this bucket
-    prefix: Option<NodeID>,    // only top `self.depth` bits are meaningful
+    depth: usize,                   // number of prefix bits fixed to get to this bucket
+    prefix: Option<NodeID>,         // only top `self.depth` bits are meaningful
     node_infos: VecDeque<NodeInfo>, // LRU peer is at the back of the vecdeque
 }
 
@@ -44,13 +44,12 @@ impl KBucket {
         self.node_infos.push_front(info);
     }
 
-
     /// Insert or update a peer
     /// If it exists, we update its info.
     /// If the bucket is full, we signal for a probe on the LRU peer, else we add to the front as the new MRU
     pub fn upsert(&mut self, peer: NodeInfo) -> InsertResult {
-	println!("upserting: {peer:?}");
-	println!("{self:?}\n");
+        println!("upserting: {peer:?}");
+        println!("{self:?}\n");
 
         if let Some(existing) = self.find_mut(peer.node_id) {
             if *existing == peer {
@@ -218,40 +217,37 @@ impl RoutingTable {
         v
     }
 
-
     pub fn contains(&self, node_id: NodeID) -> bool {
         self.find(node_id).is_some()
     }
 
     pub fn find(&self, node_id: NodeID) -> Option<&NodeInfo> {
-	fn walk<'a>(t: &'a BucketTree, node_id: NodeID) -> Option<&'a NodeInfo> {
+        fn walk<'a>(t: &'a BucketTree, node_id: NodeID) -> Option<&'a NodeInfo> {
             match t {
-		BucketTree::Bucket(b) => b.find(node_id), // assume KBucket has a find
-		BucketTree::Branch { zero, one, .. } => {
+                BucketTree::Bucket(b) => b.find(node_id), // assume KBucket has a find
+                BucketTree::Branch { zero, one, .. } => {
                     walk(zero, node_id).or_else(|| walk(one, node_id))
-		}
+                }
             }
-	}
-	walk(&self.tree, node_id)
+        }
+        walk(&self.tree, node_id)
     }
-
 
     pub fn find_mut(&mut self, node_id: NodeID) -> Option<&mut NodeInfo> {
-	fn walk<'a>(t: &'a mut BucketTree, node_id: NodeID) -> Option<&'a mut NodeInfo> {
+        fn walk<'a>(t: &'a mut BucketTree, node_id: NodeID) -> Option<&'a mut NodeInfo> {
             match t {
-		BucketTree::Bucket(b) => b.find_mut(node_id),
-		BucketTree::Branch { zero, one, .. } => {
+                BucketTree::Bucket(b) => b.find_mut(node_id),
+                BucketTree::Branch { zero, one, .. } => {
                     if let Some(found) = walk(zero, node_id) {
-			Some(found)
+                        Some(found)
                     } else {
-			walk(one, node_id)
+                        walk(one, node_id)
                     }
-		}
+                }
             }
-	}
-	walk(&mut self.tree, node_id)
+        }
+        walk(&mut self.tree, node_id)
     }
-
 
     /// return how many leaf k-buckets are store. maximum of 160, but likely far fewer
     fn count_buckets(&self) -> usize {
@@ -312,26 +308,29 @@ impl RoutingTable {
         my_id: NodeID,
         k: usize,
     ) -> (BucketTree, InsertResult) {
-
         let result = bucket.upsert(peer);
-	match result {
-	    InsertResult::Full { lru } => {
-		if bucket.covers(my_id) {
-		    // split the bucket
-		    println!("lets split");
-		    let (zero, one, bit_index) = split_bucket(bucket, k);
-		    let new_tree = BucketTree::Branch { bit_index, zero, one };
-		    (new_tree, InsertResult::SplitOccurred)
-		} else {
-		    let probe_id = ProbeID::new_random();
-		    (BucketTree::Bucket(bucket), InsertResult::NeedsProbe{ lru, probe_id })
-		}
-	    }
-	    _ => {
-		(BucketTree::Bucket(bucket), result)
-	    }
-	}
-
+        match result {
+            InsertResult::Full { lru } => {
+                if bucket.covers(my_id) {
+                    // split the bucket
+                    println!("lets split");
+                    let (zero, one, bit_index) = split_bucket(bucket, k);
+                    let new_tree = BucketTree::Branch {
+                        bit_index,
+                        zero,
+                        one,
+                    };
+                    (new_tree, InsertResult::SplitOccurred)
+                } else {
+                    let probe_id = ProbeID::new_random();
+                    (
+                        BucketTree::Bucket(bucket),
+                        InsertResult::NeedsProbe { lru, probe_id },
+                    )
+                }
+            }
+            _ => (BucketTree::Bucket(bucket), result),
+        }
     }
 
     /// a probe either came back alive, or it timed out
