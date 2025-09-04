@@ -4,9 +4,9 @@ pub mod identifier;
 pub mod routing_table;
 pub mod storage;
 
-use identifier::{NodeID, NodeInfo};
+use identifier::{Key, NodeID, NodeInfo};
 use routing_table::RoutingTable;
-use storage::Storage;
+use storage::{Storage, Value};
 
 const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
 const K: usize = 20;
@@ -15,7 +15,7 @@ const K: usize = 20;
 pub struct Node {
     pub my_info: NodeInfo,
     pub routing_table: RoutingTable,
-    pub storage: Storage,
+    storage: Storage,
 }
 
 impl Node {
@@ -32,5 +32,13 @@ impl Node {
             routing_table: RoutingTable::new(my_id, k),
             storage: Storage::new(),
         }
+    }
+
+    pub fn store(&mut self, key: Key, value: Value) {
+        self.storage.insert(key, value);
+    }
+
+    pub fn get(&self, key: &Key) -> Option<&Value> {
+        self.storage.get(key)
     }
 }

@@ -33,6 +33,7 @@ enum Message {
     },
     Nodes {
         node_id: NodeID,
+        target: NodeID, // we need to include the target to map the nodes to the lookup
         nodes: Vec<NodeInfo>,
     },
     FindValue {
@@ -116,7 +117,7 @@ impl ProtocolManager {
                 let bytes = rmp_serde::to_vec(&pong)?;
                 effects.push(Effect::Send {
                     addr: src_addr,
-                    bytes: bytes,
+                    bytes,
                 });
             }
 
@@ -134,6 +135,7 @@ impl ProtocolManager {
                 println!("Store request: key={key:?}, value={value:?}");
                 self.observe_contact(src_addr, node_id);
                 // Store the value in your local store or database
+                self.node.store(key, value);
             }
 
             Message::FindNode { node_id, target } => {
@@ -141,7 +143,11 @@ impl ProtocolManager {
                 self.observe_contact(src_addr, node_id);
                 // Find closest nodes to the given ID in your routing table
             }
-            Message::Nodes { node_id, nodes } => {
+            Message::Nodes {
+                node_id,
+                target,
+                nodes,
+            } => {
                 self.observe_contact(src_addr, node_id);
             }
 
@@ -149,6 +155,31 @@ impl ProtocolManager {
                 println!("FindValue request: key={key:?}");
                 self.observe_contact(src_addr, node_id);
                 // Lookup the value, or return closest nodes if not found
+                if let Some(value) = self.node.get(&key) {
+                    let found = Message::ValueFound {
+                        node_id: self.node.my_info.node_id,
+                        key,
+                        value: value.clone(),
+                    };
+                    let bytes = rmp_serde::to_vec(&found)?;
+                    effects.push(Effect::Send {
+                        addr: src_addr,
+                        bytes,
+                    });
+                } else {
+                    // we don't hold the value itself, so we need to check for nodes closer to to the key
+                    let closest = self.node.routing_table.k_closest(key.to_node_id());
+                    let nodes = Message::Nodes {
+                        node_id: self.node.my_info.node_id,
+                        target: key.to_node_id(),
+                        nodes: closest,
+                    };
+                    let bytes = rmp_serde::to_vec(&nodes)?;
+                    effects.push(Effect::Send {
+                        addr: src_addr,
+                        bytes,
+                    });
+                }
             }
             Message::ValueFound {
                 node_id,
@@ -249,6 +280,143 @@ mod test {
                 );
             }
             _ => panic!("expected Send Pong effect, got {:?}", effect),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_receive_store_and_find_value() {
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket);
+
+        let src_id: NodeID = NodeID::new();
+        let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+
+        // let the key be the hash of the value.
+        // TODO: figure out if we want to mandate this or allow collisions
+        let key = Key::new(&"world");
+        let value = b"world".to_vec();
+        let store_msg = Message::Store {
+            node_id: src_id,
+            key: key.clone(),
+            value: value.clone(),
+        };
+
+        pm.handle_message(store_msg, src).await.unwrap();
+
+        // make sure the addr that sent us the message is now in our table
+        assert!(pm.node.routing_table.find(src_id).is_some());
+
+        // Value should be in storage
+        let stored = pm.node.get(&key).cloned();
+        assert_eq!(stored, Some(value.clone()));
+
+        // Now, if someone requests the value, we can return it
+        let find_msg = Message::FindValue {
+            node_id: src_id,
+            key: key.clone(),
+        };
+
+        let find_effects = pm.handle_message(find_msg, src).await.unwrap();
+
+        let effect = find_effects
+            .into_iter()
+            .next()
+            .expect("expected one effect");
+        match effect {
+            Effect::Send { addr, bytes } => {
+                assert_eq!(addr, src);
+
+                let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
+                match reply {
+                    Message::ValueFound {
+                        node_id,
+                        key: k,
+                        value: v,
+                    } => {
+                        assert_eq!(node_id, pm.node.my_info.node_id);
+                        assert_eq!(k, key);
+                        assert_eq!(v, value);
+                    }
+                    _ => panic!("expected ValueFound, got {:?}", reply),
+                }
+            }
+            _ => panic!("expected Send(ValueFound), got {:?}", effect),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_receive_find_value_found() {
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8082);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket);
+
+        // Insert a value into this node's storage directly
+        let key = Key::new(&b"hello");
+        let value = b"world".to_vec();
+        pm.node.store(key, value.clone());
+
+        // Send FindValue
+        let src_id: NodeID = NodeID::new();
+        let msg: Message = Message::FindValue {
+            node_id: src_id,
+            key,
+        };
+        let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+
+        let effects: Vec<Effect> = pm.handle_message(msg, src).await.unwrap();
+
+        // The effect should be a Send with a ValueFound reply
+        let effect = effects
+            .into_iter()
+            .next()
+            .expect("there should be an effect");
+        match effect {
+            Effect::Send { addr, bytes } => {
+                assert_eq!(addr, src);
+                let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
+                assert!(matches!(reply, Message::ValueFound { key: k, value: v, .. }
+			     if k == key && v == value));
+            }
+            _ => panic!("expected Send ValueFound effect, got {:?}", effect),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_receive_find_value_nodes() {
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8083);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket);
+
+        let key = Key::new(&b"missing");
+
+        // Send FindValue for a key that isn't in storage
+        let src_id: NodeID = NodeID::new();
+        let msg: Message = Message::FindValue {
+            node_id: src_id,
+            key,
+        };
+        let src: SocketAddr = "127.0.0.1:4001".parse().unwrap();
+
+        let effects: Vec<Effect> = pm.handle_message(msg, src).await.unwrap();
+
+        // The effect should be a Send with a Nodes reply
+        let effect = effects
+            .into_iter()
+            .next()
+            .expect("there should be an effect");
+        match effect {
+            Effect::Send { addr, bytes } => {
+                assert_eq!(addr, src);
+                let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
+                // the node that made the request got added to the tree
+                assert!(matches!(reply,
+                         Message::Nodes { target, nodes, .. }
+                         if target == key.to_node_id()
+                         && nodes.iter().any(|n| n.node_id == src_id)
+                ));
+            }
+            _ => panic!("expected Send Nodes effect, got {:?}", effect),
         }
     }
 }

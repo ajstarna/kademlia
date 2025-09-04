@@ -249,6 +249,14 @@ impl RoutingTable {
         walk(&mut self.tree, node_id)
     }
 
+    /// Given a node ID, we find the k closet nodes to it
+    pub fn k_closest(&self, target_id: NodeID) -> Vec<NodeInfo> {
+        let mut nodes: Vec<NodeInfo> = self.all_nodes().into_iter().cloned().collect();
+        nodes.sort_by_key(|n| n.node_id.distance(&target_id));
+        nodes.truncate(self.k);
+        nodes
+    }
+
     /// return how many leaf k-buckets are store. maximum of 160, but likely far fewer
     fn count_buckets(&self) -> usize {
         fn walk(t: &BucketTree) -> usize {

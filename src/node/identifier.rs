@@ -1,5 +1,6 @@
 use ethereum_types::H160;
 use std::net::IpAddr;
+use std::ops::BitXor;
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -14,6 +15,10 @@ impl Key {
         hasher.update(input.as_ref());
         let digest = hasher.finalize();
         Self(H160::from_slice(&digest))
+    }
+
+    pub fn to_node_id(&self) -> NodeID {
+        NodeID(self.0)
     }
 }
 
@@ -66,13 +71,52 @@ impl NodeID {
 
         NodeID(H160::from(bytes))
     }
+
+    // helpful when comparing distances across nodes in our buckets
+    pub fn distance(&self, other: &NodeID) -> Distance {
+        Distance(self.0 ^ other.0)
+    }
 }
+
+impl BitXor for NodeID {
+    type Output = NodeID;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        NodeID(self.0 ^ rhs.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Distance(H160);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeInfo {
+    #[serde(with = "serde_ipaddr")]
     pub ip_address: IpAddr,
     pub udp_port: u16,
     pub node_id: NodeID,
+}
+
+// Needed for msgpack ser/de of IpAddr.
+// Instead of producing a map with the enum variant, we simply convert right into a string.
+mod serde_ipaddr {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::net::IpAddr;
+
+    pub fn serialize<S>(ip: &IpAddr, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&ip.to_string())
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<IpAddr, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
