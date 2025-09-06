@@ -250,6 +250,9 @@ impl RoutingTable {
     }
 
     /// Given a node ID, we find the k closet nodes to it
+    /// Note: we do the simply and less efficient strategy of sorting all possible nodes.
+    /// TODO: do a more efficient search, keeping a heap of buckets and looking at the closest
+    /// buckets until we have K nodes.
     pub fn k_closest(&self, target_id: NodeID) -> Vec<NodeInfo> {
         let mut nodes: Vec<NodeInfo> = self.all_nodes().into_iter().cloned().collect();
         nodes.sort_by_key(|n| n.node_id.distance(&target_id));
@@ -489,4 +492,62 @@ mod test {
         // Still only 2 buckets; no extra split happened.
         assert_eq!(rt.count_buckets(), 2);
     }
+
+
+    /// Test that k_closest works, even in the case where it needs to get k nodes
+    /// from across more than one bucket.
+    #[test]
+    fn k_closest() {
+	let my_id: NodeID = id_with_first_byte(0x80); // MSB = 1
+	let k: usize = 2;
+	let mut rt: RoutingTable = RoutingTable::new(my_id, k);
+
+	// Helper to absorb SplitOccurred
+	let mut insert = |peer: NodeInfo| {
+            loop {
+		match rt.try_insert(peer) {
+                    InsertResult::SplitOccurred => continue,
+                    _ => break,
+		}
+            }
+	};
+
+	// Two near-side peers (MSB=1)
+	let near1: NodeInfo = make_peer(1, 4001, 0x81);
+	let near2: NodeInfo = make_peer(2, 4002, 0x82);
+	insert(near1);
+	insert(near2);
+
+	// One far-side peer (MSB=0) → causes split
+	let far: NodeInfo = make_peer(3, 4003, 0x01);
+	insert(far);
+
+	// Sanity: should have two buckets now
+	assert_eq!(rt.count_buckets(), 2);
+
+
+	// Case 1: Pick a target closer to the two near nodes, i.e. a single bucket
+	let target: NodeID = id_with_first_byte(0xA0);
+
+	let closest: Vec<NodeInfo> = rt.k_closest(target);
+	assert_eq!(closest.len(), k);
+
+	let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
+	assert!(ids.contains(&near1.node_id));
+	assert!(ids.contains(&near2.node_id));
+
+
+	// Case 2: Pick a target closer to the far peer than to near nodes
+	// We will need results from more than one bucket
+	let target: NodeID = id_with_first_byte(0x00);
+
+	let closest: Vec<NodeInfo> = rt.k_closest(target);
+	assert_eq!(closest.len(), k);
+
+	let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
+	assert!(ids.contains(&far.node_id));
+	// near1 is closer than near2 to the target
+	assert!(ids.contains(&near1.node_id));
+    }
+
 }
