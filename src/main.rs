@@ -15,7 +15,8 @@ async fn main() -> anyhow::Result<()> {
 
     let k = 20;
     let node = Node::new(k, ip, port);
-    let manager = ProtocolManager::new(node, socket);
+    let alpha = 3;
+    let manager = ProtocolManager::new(node, socket, alpha);
 
     manager.run().await;
     Ok(())

@@ -1,0 +1,15 @@
+- apply returned effects from handle_method
+- send probes
+- handle resolve pending probes
+- lookup state machine for values and nodes
+    - it has its target (for a find value or find node call)
+    - when we get nodes back, do the whole recursive alpha thing
+    - also need timeouts
+    - when we get a value back, we are done? (send it back to the channel; see bellow)
+- ability for an application to talk to the protocol manager via some API. Basically with a store and get method
+    - i think make the DHT a library, and the user would spawn run in a tokio async task then talk to it via a channel.
+    - maybe a new KademliaDHT struct that inside its new() it spawns a tokio task to run the protocol manager? And returns
+    the channel handle for the user? So the user can interact with the DHT without worrying about the PM running on a task?
+    Is this how things are handles? Alternatively the user of the lib would need to run their own task and stuff.
+    - have a binary crate along with the library
+- test framework for running multiple nodes

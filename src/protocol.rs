@@ -9,7 +9,7 @@ use crate::{
     node::storage::Value,
     node::Node,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 // each message type includes the NodeID of the sender
@@ -18,9 +18,11 @@ use std::time::Instant;
 enum Message {
     Ping {
         node_id: NodeID,
+	probe_id: ProbeID, // a unique id for this specific request
     },
     Pong {
         node_id: NodeID,
+	probe_id: ProbeID, // a unique id for this specific request
     },
     Store {
         node_id: NodeID,
@@ -50,6 +52,7 @@ enum Message {
 pub struct ProtocolManager {
     pub node: Node,
     pub socket: UdpSocket,
+    pub alpha: usize, // concurrency parameter
 }
 
 /// Effect represents the "side effect" that `handle_message` wants the outer
@@ -75,9 +78,22 @@ struct PendingProbe {
     deadline: Instant,
 }
 
+struct Lookup {
+    // keep the target as a NodeID, even thought sometimes it is a
+    target: NodeID,
+    short_list: Vec<NodeInfo>,
+    queried: HashSet<NodeID>, // indicate who we have sent a request to already
+    in_flight: HashMap<ProbeID, NodeInfo>, // active queries
+}
+
+struct PendingLookup {
+    target: NodeID,
+    deadline: Instant,
+}
+
 impl ProtocolManager {
-    pub fn new(node: Node, socket: UdpSocket) -> Self {
-        Self { node, socket }
+    pub fn new(node: Node, socket: UdpSocket, alpha: usize) -> Self {
+        Self { node, socket, alpha }
     }
 
     fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> InsertResult {
@@ -108,11 +124,12 @@ impl ProtocolManager {
     ) -> anyhow::Result<Vec<Effect>> {
         let mut effects = Vec::new();
         match msg {
-            Message::Ping { node_id } => {
+            Message::Ping { node_id, probe_id } => {
                 println!("Received Ping from {node_id:?}");
                 self.observe_contact(src_addr, node_id);
                 let pong = Message::Pong {
                     node_id: self.node.my_info.node_id,
+		    probe_id,
                 };
                 let bytes = rmp_serde::to_vec(&pong)?;
                 effects.push(Effect::Send {
@@ -121,10 +138,12 @@ impl ProtocolManager {
                 });
             }
 
-            Message::Pong { node_id } => {
+            Message::Pong { node_id, probe_id } => {
                 println!("Received Pong from {node_id:?}");
                 self.observe_contact(src_addr, node_id);
                 // Maybe mark the node as alive or update routing table
+		pending_probes.remove(&probe_id);
+		routing_table.resolve_probe(probe_id, alive = true);
             }
 
             Message::Store {
@@ -139,9 +158,22 @@ impl ProtocolManager {
             }
 
             Message::FindNode { node_id, target } => {
-                println!("FindNode request: looking for {node_id:?}");
+                println!("FindNode request: looking for {target:?}");
                 self.observe_contact(src_addr, node_id);
                 // Find closest nodes to the given ID in your routing table
+                    let closest = self.node.routing_table.k_closest(target);
+                    let nodes = Message::Nodes {
+                        node_id: self.node.my_info.node_id,
+                        target,
+                        nodes: closest,
+                    };
+                    let bytes = rmp_serde::to_vec(&nodes)?;
+                    effects.push(Effect::Send {
+                        addr: src_addr,
+                        bytes,
+                    });
+
+
             }
             Message::Nodes {
                 node_id,
@@ -149,6 +181,11 @@ impl ProtocolManager {
                 nodes,
             } => {
                 self.observe_contact(src_addr, node_id);
+
+		// also observe the new nodes we just learned about
+		for n in nodes {
+		    self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id);
+		}
             }
 
             Message::FindValue { node_id, key } => {
@@ -200,7 +237,9 @@ impl ProtocolManager {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         // where we store pending probes and clean them up if they time out
-        let mut pending: HashMap<ProbeID, PendingProbe> = HashMap::new();
+        let mut pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
+
+        let mut pending_lookups: HashMap<NodeID, PendingProbe> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -212,7 +251,13 @@ impl ProtocolManager {
                     let msg = rmp_serde::from_slice::<Message>(&buf[..len]);
                     match msg {
                     Ok(msg) => {
-                        let _ = self.handle_message(msg, src_addr).await;
+                        let effects = self.handle_message(msg, src_addr).await;
+			if let Ok(effects) = effects {
+			    for eff in effects {
+				// TODO
+				//self.apply_effect(eff).await;
+			    }
+			}
                     }
                     Err(e) => {
                         eprintln!("Error receiving message: {e}");
@@ -227,21 +272,26 @@ impl ProtocolManager {
                 }
             }
 
+		//
+		// TODO: another arm that reads from a channel from the user of the DHT
+		// it can start lookups
+
             // timeout arm (sweep or heap-based)
             _ = ticker.tick() => {
                 let now = Instant::now();
                 let mut expired = Vec::new();
-                for (probe_id, pending) in pending.iter() {
+                for (probe_id, pending) in pending_probes.iter() {
                 if pending.deadline <= now {
                     expired.push(*probe_id);
                 }
                 }
                 for probe_id in expired {
-                pending.remove(&probe_id);
-                // tell the table that this probe timed out
-                let _ = self.node.routing_table.resolve_probe(probe_id, /*alive=*/false);
+                    pending_probes.remove(&probe_id);
+                    // tell the table that this probe timed out
+                    let _ = self.node.routing_table.resolve_probe(probe_id, /*alive=*/false);
                 }
 
+		//TODO: also check for expired lookups
             }
             }
         }
@@ -256,7 +306,7 @@ mod test {
     async fn test_receive_ping() {
         let node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
         let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-        let mut pm = ProtocolManager::new(node, dummy_socket);
+        let mut pm = ProtocolManager::new(node, dummy_socket, 3);
 
         let src_id = NodeID::new();
         let msg = Message::Ping { node_id: src_id };
@@ -287,7 +337,7 @@ mod test {
     async fn test_receive_store_and_find_value() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
 
         let src_id: NodeID = NodeID::new();
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -349,7 +399,7 @@ mod test {
     async fn test_receive_find_value_found() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8082);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
 
         // Insert a value into this node's storage directly
         let key = Key::new(&b"hello");
@@ -386,7 +436,7 @@ mod test {
     async fn test_receive_find_value_nodes() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8083);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
 
         let key = Key::new(&b"missing");
 
