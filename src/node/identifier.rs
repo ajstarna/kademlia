@@ -2,6 +2,7 @@ use ethereum_types::H160;
 use std::net::IpAddr;
 use std::ops::BitXor;
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -21,6 +22,21 @@ impl Key {
         NodeID(self.0)
     }
 }
+
+/// The ID corresponding to an attempted insert on a full K bucket.
+/// A probe is sent out to the LRU, and if they do not respond in time,
+/// then we boot them from the bucket and finish the new insertion.
+/// The ID tells us which initial attempted insert is ready to resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProbeID(u64);
+
+impl ProbeID {
+    pub fn new_random() -> Self {
+        let val: u64 = rand::rng().random();
+        Self(val)
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeID(pub H160);

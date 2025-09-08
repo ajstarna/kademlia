@@ -1,6 +1,4 @@
-- apply returned effects from handle_method
-- send probes
-- handle resolve pending probes
+- probe unit test for timeout and returned
 - lookup state machine for values and nodes
     - it has its target (for a find value or find node call)
     - when we get nodes back, do the whole recursive alpha thing
@@ -12,4 +10,6 @@
     the channel handle for the user? So the user can interact with the DHT without worrying about the PM running on a task?
     Is this how things are handles? Alternatively the user of the lib would need to run their own task and stuff.
     - have a binary crate along with the library
-- test framework for running multiple nodes
+- test framework for running multiple nodes.
+    - Could this include some unit tests with two protocol managers? Mock sockets right?
+    - then some larger integration tests that actually spin up separate nodes and run through some cases.

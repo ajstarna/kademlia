@@ -4,13 +4,16 @@ use tokio::net::UdpSocket;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
 use crate::{
-    node::identifier::{Key, NodeID, NodeInfo},
-    node::routing_table::{InsertResult, ProbeID},
+    node::identifier::{Key, NodeID, NodeInfo, ProbeID},
+    node::routing_table::{InsertResult},
     node::storage::Value,
     node::Node,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // each message type includes the NodeID of the sender
 #[derive(Serialize, Deserialize, Debug)]
@@ -49,12 +52,6 @@ enum Message {
     },
 }
 
-pub struct ProtocolManager {
-    pub node: Node,
-    pub socket: UdpSocket,
-    pub alpha: usize, // concurrency parameter
-}
-
 /// Effect represents the "side effect" that `handle_message` wants the outer
 /// event loop to perform.
 ///
@@ -67,14 +64,15 @@ enum Effect {
         bytes: Vec<u8>,
     },
     StartProbe {
-        addr: SocketAddr,
+        peer: NodeInfo,
         probe_id: ProbeID,
         bytes: Vec<u8>,
     },
 }
 
+#[derive(Copy, Debug, Clone)]
 struct PendingProbe {
-    peer: SocketAddr,
+    peer: NodeInfo,
     deadline: Instant,
 }
 
@@ -91,12 +89,20 @@ struct PendingLookup {
     deadline: Instant,
 }
 
+pub struct ProtocolManager {
+    pub node: Node,
+    pub socket: UdpSocket,
+    pub alpha: usize, // concurrency parameter
+    pub pending_probes: HashMap<ProbeID, PendingProbe>,
+}
+
 impl ProtocolManager {
     pub fn new(node: Node, socket: UdpSocket, alpha: usize) -> Self {
-        Self { node, socket, alpha }
+        let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
+        Self { node, socket, alpha, pending_probes }
     }
 
-    fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> InsertResult {
+    fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> Option<Effect> {
         let peer = NodeInfo {
             ip_address: src_addr.ip(),
             udp_port: src_addr.port(), // use observed source port (NAT-friendly)
@@ -112,7 +118,17 @@ impl ProtocolManager {
                     // continue splitting.
                     continue;
                 }
-                other => break other,
+		InsertResult::Full { lru  } => {
+                    let probe_id = ProbeID::new_random();
+		    let ping = Message::Ping {
+			node_id: self.node.my_info.node_id,
+			probe_id,
+                    };
+                    let bytes = rmp_serde::to_vec(&ping).expect("serialize probe Ping");
+                    return Some(Effect::StartProbe { peer:lru, probe_id, bytes });
+		}
+		// TODO: check if we care about other insert result variants
+                other => break None,
             }
         }
     }
@@ -123,10 +139,9 @@ impl ProtocolManager {
         src_addr: SocketAddr,
     ) -> anyhow::Result<Vec<Effect>> {
         let mut effects = Vec::new();
-        match msg {
+        let node_id = match msg {
             Message::Ping { node_id, probe_id } => {
                 println!("Received Ping from {node_id:?}");
-                self.observe_contact(src_addr, node_id);
                 let pong = Message::Pong {
                     node_id: self.node.my_info.node_id,
 		    probe_id,
@@ -136,14 +151,19 @@ impl ProtocolManager {
                     addr: src_addr,
                     bytes,
                 });
+		node_id
             }
 
             Message::Pong { node_id, probe_id } => {
                 println!("Received Pong from {node_id:?}");
-                self.observe_contact(src_addr, node_id);
                 // Maybe mark the node as alive or update routing table
-		pending_probes.remove(&probe_id);
-		routing_table.resolve_probe(probe_id, alive = true);
+		if let Some(pending) = self.pending_probes.remove(&probe_id) {
+		    self.node.routing_table.resolve_probe(pending.peer, /*alive =*/ true);
+		} else {
+		    // TODO: is there more to think about here?
+		    println!("A Pong was received without an associated probe_id. Interesting. {node_id:?}");
+		}
+		node_id
             }
 
             Message::Store {
@@ -152,45 +172,44 @@ impl ProtocolManager {
                 value,
             } => {
                 println!("Store request: key={key:?}, value={value:?}");
-                self.observe_contact(src_addr, node_id);
                 // Store the value in your local store or database
                 self.node.store(key, value);
+		node_id
             }
 
             Message::FindNode { node_id, target } => {
                 println!("FindNode request: looking for {target:?}");
-                self.observe_contact(src_addr, node_id);
                 // Find closest nodes to the given ID in your routing table
-                    let closest = self.node.routing_table.k_closest(target);
-                    let nodes = Message::Nodes {
-                        node_id: self.node.my_info.node_id,
-                        target,
-                        nodes: closest,
-                    };
-                    let bytes = rmp_serde::to_vec(&nodes)?;
-                    effects.push(Effect::Send {
-                        addr: src_addr,
-                        bytes,
-                    });
-
-
+                let closest = self.node.routing_table.k_closest(target);
+                let nodes = Message::Nodes {
+                    node_id: self.node.my_info.node_id,
+                    target,
+                    nodes: closest,
+                };
+                let bytes = rmp_serde::to_vec(&nodes)?;
+                effects.push(Effect::Send {
+                    addr: src_addr,
+                    bytes,
+                });
+		node_id
             }
+
             Message::Nodes {
                 node_id,
                 target,
                 nodes,
             } => {
-                self.observe_contact(src_addr, node_id);
-
-		// also observe the new nodes we just learned about
+		// observe all the new nodes we just learned about
 		for n in nodes {
-		    self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id);
+		    if let Some(eff) = self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id) {
+			effects.push(eff);
+		    }
 		}
+		node_id
             }
 
             Message::FindValue { node_id, key } => {
                 println!("FindValue request: key={key:?}");
-                self.observe_contact(src_addr, node_id);
                 // Lookup the value, or return closest nodes if not found
                 if let Some(value) = self.node.get(&key) {
                     let found = Message::ValueFound {
@@ -217,16 +236,43 @@ impl ProtocolManager {
                         bytes,
                     });
                 }
+		node_id
             }
             Message::ValueFound {
                 node_id,
                 key,
                 value,
             } => {
-                self.observe_contact(src_addr, node_id);
+		node_id
             }
-        }
+        };
+
+	// now we add the peer to our routing_table
+	if let Some(eff) = self.observe_contact(src_addr, node_id) {
+	    effects.push(eff);
+	}
+
         Ok(effects)
+    }
+
+    async fn apply_effect(&mut self, effect: Effect) {
+	match effect {
+	    Effect::Send { addr, bytes } => {
+		if let Err(e) = self.socket.send_to(&bytes, addr).await {
+		    eprintln!("Failed to send to {addr}: {e}");
+		}
+	    }
+	    Effect::StartProbe { peer, probe_id, bytes } => {
+                let addr = SocketAddr::new(peer.ip_address, peer.udp_port);
+		if let Err(e) = self.socket.send_to(&bytes, addr).await {
+		    eprintln!("Failed to send probe to {addr}: {e}");
+		} else {
+		    // Record the probe so we can resolve it later
+		    let deadline = Instant::now() + PROBE_TIMEOUT;
+		    self.pending_probes.insert(probe_id, PendingProbe{ peer, deadline });
+		}
+	    }
+	}
     }
 
     /// This for messages in a loop, and respond accordingly
@@ -237,9 +283,8 @@ impl ProtocolManager {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         // where we store pending probes and clean them up if they time out
-        let mut pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
 
-        let mut pending_lookups: HashMap<NodeID, PendingProbe> = HashMap::new();
+        //let mut pending_lookups: HashMap<NodeID, PendingProbe> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -254,8 +299,7 @@ impl ProtocolManager {
                         let effects = self.handle_message(msg, src_addr).await;
 			if let Ok(effects) = effects {
 			    for eff in effects {
-				// TODO
-				//self.apply_effect(eff).await;
+				self.apply_effect(eff).await;
 			    }
 			}
                     }
@@ -280,15 +324,15 @@ impl ProtocolManager {
             _ = ticker.tick() => {
                 let now = Instant::now();
                 let mut expired = Vec::new();
-                for (probe_id, pending) in pending_probes.iter() {
+                for (probe_id, pending) in self.pending_probes.iter() {
                 if pending.deadline <= now {
-                    expired.push(*probe_id);
+                    expired.push((*probe_id, *pending));
                 }
                 }
-                for probe_id in expired {
-                    pending_probes.remove(&probe_id);
+                for (probe_id, pending) in expired {
+                    self.pending_probes.remove(&probe_id);
                     // tell the table that this probe timed out
-                    let _ = self.node.routing_table.resolve_probe(probe_id, /*alive=*/false);
+                    let _ = self.node.routing_table.resolve_probe(pending.peer, /*alive=*/false);
                 }
 
 		//TODO: also check for expired lookups
@@ -309,7 +353,8 @@ mod test {
         let mut pm = ProtocolManager::new(node, dummy_socket, 3);
 
         let src_id = NodeID::new();
-        let msg = Message::Ping { node_id: src_id };
+	let probe_id= ProbeID::new_random();
+        let msg = Message::Ping { node_id: src_id, probe_id };
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
 
         let effects = pm.handle_message(msg, src).await.unwrap();
@@ -326,7 +371,7 @@ mod test {
                 assert_eq!(addr, src);
                 let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
                 assert!(
-                    matches!(reply, Message::Pong { node_id } if node_id == pm.node.my_info.node_id)
+                    matches!(reply, Message::Pong { node_id, probe_id: pid } if node_id == pm.node.my_info.node_id && pid == probe_id )
                 );
             }
             _ => panic!("expected Send Pong effect, got {:?}", effect),
@@ -461,12 +506,13 @@ mod test {
                 let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
                 // the node that made the request got added to the tree
                 assert!(matches!(reply,
-                         Message::Nodes { target, nodes, .. }
-                         if target == key.to_node_id()
-                         && nodes.iter().any(|n| n.node_id == src_id)
-                ));
+                         Message::Nodes { target, .. }
+                         if target == key.to_node_id())
+                );
             }
             _ => panic!("expected Send Nodes effect, got {:?}", effect),
         }
+	// sanity check that the node that made the request got added to the tree
+	assert!(pm.node.routing_table.find(src_id).is_some());
     }
 }

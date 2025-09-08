@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 
 use super::identifier::{NodeID, NodeInfo};
-use rand::Rng;
 
 #[derive(Debug)]
 struct KBucket {
@@ -48,24 +47,40 @@ impl KBucket {
     /// If it exists, we update its info.
     /// If the bucket is full, we signal for a probe on the LRU peer, else we add to the front as the new MRU
     pub fn upsert(&mut self, peer: NodeInfo) -> InsertResult {
-        println!("upserting: {peer:?}");
-        println!("{self:?}\n");
+	if let Some(pos) = self.node_infos.iter().position(|n| n.node_id == peer.node_id) {
+            // Remove the existing node
+            let mut node = self.node_infos.remove(pos).unwrap();
 
-        if let Some(existing) = self.find_mut(peer.node_id) {
-            if *existing == peer {
-                InsertResult::AlreadyPresent
+            if node == peer {
+		// No field changes, just move to MRU
+		self.node_infos.push_front(node);
+		InsertResult::AlreadyPresent
             } else {
-                existing.ip_address = peer.ip_address;
-                existing.udp_port = peer.udp_port;
-                InsertResult::Updated
+		// Update contact info + move to MRU
+		node.ip_address = peer.ip_address;
+		node.udp_port = peer.udp_port;
+		self.node_infos.push_front(node);
+		InsertResult::Updated
             }
-        } else if self.is_full() {
-            // return NeedsProbe with the eviction candidate
+	} else if self.is_full() {
+            // Return eviction candidate
             let lru = self.node_infos.back().unwrap().clone();
             InsertResult::Full { lru }
-        } else {
-            self.node_infos.push_front(peer); // or whatever LRU policy you decide
+	} else {
+            // Insert as MRU
+            self.node_infos.push_front(peer);
             InsertResult::Inserted
+	}
+    }
+
+    // Remove the peer with the given node_id if it exists
+    // Return a bool to say if the node indeed existed and was removed
+    pub fn remove_peer(&mut self, node_id: NodeID) -> bool {
+        if let Some(pos) = self.node_infos.iter().position(|n| n.node_id == node_id) {
+            self.node_infos.remove(pos);
+            true
+        } else {
+            false
         }
     }
 
@@ -160,26 +175,11 @@ fn split_bucket(bucket: KBucket, k: usize) -> (Box<BucketTree>, Box<BucketTree>,
     )
 }
 
-/// The ID corresponding to an attempted insert on a full K bucket.
-/// A probe is sent out to the LRU, and if they do not respond in time,
-/// then we boot them from the bucket and finish the new insertion.
-/// The ID tells us which initial attempted insert is ready to resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProbeID(u64);
-
-impl ProbeID {
-    pub fn new_random() -> Self {
-        let val: u64 = rand::rng().random();
-        Self(val)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InsertResult {
     Inserted,       // normal insertion
     AlreadyPresent, // exact nodeinfo already exists
     Updated,        // The node_id existed but with different contact info
-    NeedsProbe { lru: NodeInfo, probe_id: ProbeID },
     Full { lru: NodeInfo }, // a bucket can say it is full and give the lru in case a probe is needed
     SplitOccurred,
 }
@@ -243,6 +243,19 @@ impl RoutingTable {
                     } else {
                         walk(one, node_id)
                     }
+                }
+            }
+        }
+        walk(&mut self.tree, node_id)
+    }
+
+    pub fn remove_peer(&mut self, node_id: NodeID) -> bool {
+        fn walk(t: &mut BucketTree, node_id: NodeID) -> bool {
+            match t {
+                BucketTree::Bucket(b) => b.remove_peer(node_id),
+                BucketTree::Branch { zero, one, .. } => {
+                    // Try left, else right
+                    walk(zero, node_id) || walk(one, node_id)
                 }
             }
         }
@@ -333,10 +346,9 @@ impl RoutingTable {
                     };
                     (new_tree, InsertResult::SplitOccurred)
                 } else {
-                    let probe_id = ProbeID::new_random();
                     (
                         BucketTree::Bucket(bucket),
-                        InsertResult::NeedsProbe { lru, probe_id },
+			result  // forward the `Full` result to the protocol for a probe
                     )
                 }
             }
@@ -347,7 +359,15 @@ impl RoutingTable {
     /// a probe either came back alive, or it timed out
     /// If alive, we keep the lru entry in the bucket and update its status.
     /// If dead, then we remove it from the bucket and complete the original insertion
-    pub fn resolve_probe(&mut self, probe_id: ProbeID, alive: bool) {}
+    pub fn resolve_probe(&mut self, peer: NodeInfo, alive: bool) {
+	if alive {
+            // treat like a fresh contact → move to MRU
+            let _ = self.try_insert(peer);
+	} else {
+            // drop the peer entirely
+            self.remove_peer(peer.node_id);
+	}
+    }
 }
 
 #[cfg(test)]
@@ -480,7 +500,7 @@ mod test {
         match insert_result {
             // the lru should be the node we inserted first into this bucket
             // we ignore the random probe ID
-            InsertResult::NeedsProbe { lru, .. } => {
+            InsertResult::Full { lru } => {
                 assert_eq!(
                     lru, expected_lru,
                     "LRU in far bucket should be the earliest far insert"
