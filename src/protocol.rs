@@ -228,6 +228,9 @@ impl ProtocolManager {
 			effects.push(eff);
 		    }
 		}
+
+		// TODO: the target should correspond to a pending lookup right?
+
 		node_id
             }
 
@@ -267,7 +270,9 @@ impl ProtocolManager {
                 value,
             } => {
 		let target = key.to_node_id();
+
 		if let Some(lookup) = self.pending_lookups.get_mut(&target) {
+		    // TODO: the target should correspond to a pending lookup right?
 		    todo!()
 		    // lookup.complete_with_value(value.clone());
 		}
