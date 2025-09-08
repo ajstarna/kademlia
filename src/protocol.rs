@@ -50,7 +50,16 @@ enum Message {
         key: Key,
         value: Value,
     },
+    // Note: this is not a real message in the protocol.
+    // For development purposes, we have this message to test starting and driving a lookup
+    // Once it is working, we are going to have to handle user commands. Possibly from a channel.
+    StartLookup {
+        node_id: NodeID,
+        key: Key,
+    },
+
 }
+
 
 /// Effect represents the "side effect" that `handle_message` wants the outer
 /// event loop to perform.
@@ -94,12 +103,14 @@ pub struct ProtocolManager {
     pub socket: UdpSocket,
     pub alpha: usize, // concurrency parameter
     pub pending_probes: HashMap<ProbeID, PendingProbe>,
+    pub pending_lookups: HashMap<NodeID, PendingLookup>,
 }
 
 impl ProtocolManager {
     pub fn new(node: Node, socket: UdpSocket, alpha: usize) -> Self {
         let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
-        Self { node, socket, alpha, pending_probes }
+        let pending_lookups: HashMap<NodeID, PendingLookup> = HashMap::new();
+        Self { node, socket, alpha, pending_probes, pending_lookups }
     }
 
     fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> Option<Effect> {
@@ -243,8 +254,19 @@ impl ProtocolManager {
                 key,
                 value,
             } => {
+		let target = key.to_node_id();
+		if let Some(lookup) = self.pending_lookups.get_mut(&target) {
+		    lookup.complete_with_value(value.clone());
+		}
+
+		// Optionally Cache the value in our own local storage
+		self.node.store(key, value);
 		node_id
             }
+
+	    // TODO: this is code for developing the lookup functionality
+	    // eventually we will receive commands from our user.
+	    Message::StartLookup { .. } => todo!()
         };
 
 	// now we add the peer to our routing_table
@@ -281,10 +303,6 @@ impl ProtocolManager {
 
         let mut ticker = interval(Duration::from_secs(1)); // how often do we clean expired probes
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-        // where we store pending probes and clean them up if they time out
-
-        //let mut pending_lookups: HashMap<NodeID, PendingProbe> = HashMap::new();
 
         loop {
             tokio::select! {

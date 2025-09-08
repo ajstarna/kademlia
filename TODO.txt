@@ -10,6 +10,9 @@
     the channel handle for the user? So the user can interact with the DHT without worrying about the PM running on a task?
     Is this how things are handles? Alternatively the user of the lib would need to run their own task and stuff.
     - have a binary crate along with the library
+- bootstrap nodes
+- joining the network (there is a described process of requesting yourself or something like that)
 - test framework for running multiple nodes.
     - Could this include some unit tests with two protocol managers? Mock sockets right?
+        - actually maybe just two DHTs as implemented in the above TODO
     - then some larger integration tests that actually spin up separate nodes and run through some cases.
