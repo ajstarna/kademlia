@@ -14,6 +14,7 @@ use std::time::Instant;
 
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 // each message type includes the NodeID of the sender
 #[derive(Serialize, Deserialize, Debug)]
@@ -93,8 +94,19 @@ struct Lookup {
     in_flight: HashMap<ProbeID, NodeInfo>, // active queries
 }
 
+impl Lookup {
+    pub fn new(target: NodeID, initial_candidates: Vec<NodeInfo>) -> Self {
+        Lookup {
+            target,
+            short_list: initial_candidates,
+            queried: HashSet::new(),
+            in_flight: HashMap::new(),
+        }
+    }
+}
+
 struct PendingLookup {
-    target: NodeID,
+    lookup: Lookup,
     deadline: Instant,
 }
 
@@ -256,7 +268,8 @@ impl ProtocolManager {
             } => {
 		let target = key.to_node_id();
 		if let Some(lookup) = self.pending_lookups.get_mut(&target) {
-		    lookup.complete_with_value(value.clone());
+		    todo!()
+		    // lookup.complete_with_value(value.clone());
 		}
 
 		// Optionally Cache the value in our own local storage
@@ -266,7 +279,13 @@ impl ProtocolManager {
 
 	    // TODO: this is code for developing the lookup functionality
 	    // eventually we will receive commands from our user.
-	    Message::StartLookup { .. } => todo!()
+	    Message::StartLookup { node_id, key } => {
+		let initial = self.node.routing_table.k_closest(key.to_node_id());
+		let lookup = Lookup::new(key.to_node_id(), initial);
+		let deadline = Instant::now() + LOOKUP_TIMEOUT;
+		self.pending_lookups.insert(key.to_node_id(), PendingLookup{ lookup, deadline });
+		node_id
+	    }
         };
 
 	// now we add the peer to our routing_table
