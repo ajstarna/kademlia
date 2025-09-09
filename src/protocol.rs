@@ -387,6 +387,8 @@ impl ProtocolManager {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::test_support::test_support::{id_with_first_byte, make_peer};
+    use crate::node::routing_table::InsertResult;
 
     #[tokio::test]
     async fn test_receive_ping() {
@@ -556,5 +558,254 @@ mod test {
         }
 	// sanity check that the node that made the request got added to the tree
 	assert!(pm.node.routing_table.find(src_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_start_lookup_sends_alpha_findvalue() {
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8090);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+
+        // Prepare peers with known distances to the target
+        let target: NodeID = id_with_first_byte(0x00);
+        let p1 = make_peer(1, 5001, 0x00); // closest
+        let p2 = make_peer(2, 5002, 0x01);
+        let p3 = make_peer(3, 5003, 0x02);
+        let p4 = make_peer(4, 5004, 0x80); // far
+
+        // Helper to absorb splits
+        let mut insert = |peer: NodeInfo| {
+            loop {
+                match pm.node.routing_table.try_insert(peer) {
+                    InsertResult::SplitOccurred => continue,
+                    _ => break,
+                }
+            }
+        };
+        insert(p1);
+        insert(p2);
+        insert(p3);
+        insert(p4);
+
+        // Start the lookup
+        let key = Key(target.0);
+        let src_id: NodeID = NodeID::new();
+        let msg = Message::StartLookup { node_id: src_id, key };
+        let src: SocketAddr = "127.0.0.1:4002".parse().unwrap();
+
+        let effects = pm.handle_message(msg, src).await.unwrap();
+
+        // Collect sends and decode; should be alpha sends to the three closest peers
+        let mut dests = Vec::new();
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(reply) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if matches!(reply, Message::FindValue { .. }) {
+                        dests.push(addr);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(dests.len(), 3, "should send alpha FindValue requests");
+        let set: std::collections::HashSet<SocketAddr> = dests.into_iter().collect();
+        let expected: std::collections::HashSet<SocketAddr> = vec![
+            SocketAddr::new(p1.ip_address, p1.udp_port),
+            SocketAddr::new(p2.ip_address, p2.udp_port),
+            SocketAddr::new(p3.ip_address, p3.udp_port),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set, expected);
+    }
+
+    #[tokio::test]
+    async fn test_nodes_reply_topups_lookup() {
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8091);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let p1 = make_peer(1, 6001, 0x00);
+        let p2 = make_peer(2, 6002, 0x01);
+        let p3 = make_peer(3, 6003, 0x02);
+
+        let mut insert = |peer: NodeInfo| {
+            loop {
+                match pm.node.routing_table.try_insert(peer) {
+                    InsertResult::SplitOccurred => continue,
+                    _ => break,
+                }
+            }
+        };
+        insert(p1);
+        insert(p2);
+        insert(p3);
+
+        // Start the lookup
+        let key = Key(target.0);
+        let src_id: NodeID = NodeID::new();
+        let start = Message::StartLookup { node_id: src_id, key };
+        let src: SocketAddr = "127.0.0.1:4100".parse().unwrap();
+        let _ = pm.handle_message(start, src).await.unwrap();
+
+        // Nodes reply from p1 introducing a new peer p4
+        let p4 = make_peer(4, 6004, 0x03);
+        let nodes_msg = Message::Nodes {
+            node_id: p1.node_id,
+            target,
+            nodes: vec![p4],
+        };
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let effects = pm.handle_message(nodes_msg, p1_addr).await.unwrap();
+
+        // Expect a new FindValue sent to p4 to maintain alpha
+        let mut sent_to_p4 = false;
+        for eff in effects {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == SocketAddr::new(p4.ip_address, p4.udp_port) {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindValue { .. }) {
+                            sent_to_p4 = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(sent_to_p4, "should top up with a request to new candidate");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_lookup_timeout_topups() {
+        // Alpha=2, 3 peers → expect 2 initial requests, then after timeout a top-up to the 3rd
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8092);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 2);
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let p1 = make_peer(1, 6101, 0x00); // closest
+        let p2 = make_peer(2, 6102, 0x01); // next
+        let p3 = make_peer(3, 6103, 0x80); // far
+
+        // Insert peers, absorbing splits
+        let mut insert = |peer: NodeInfo| {
+            loop {
+                match pm.node.routing_table.try_insert(peer) {
+                    InsertResult::SplitOccurred => continue,
+                    _ => break,
+                }
+            }
+        };
+        insert(p1);
+        insert(p2);
+        insert(p3);
+
+        // Start lookup: should send 2 initial FindValue requests (alpha=2)
+        let key = Key(target.0);
+        let src_id: NodeID = NodeID::new();
+        let start = Message::StartLookup { node_id: src_id, key };
+        let src: SocketAddr = "127.0.0.1:4200".parse().unwrap();
+        let effects = pm.handle_message(start, src).await.unwrap();
+
+        let mut initial_dests = Vec::new();
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if matches!(msg, Message::FindValue { .. }) {
+                        initial_dests.push(addr);
+                    }
+                }
+            }
+        }
+        assert_eq!(initial_dests.len(), 2, "initial sends should match alpha");
+
+        // Advance mocked time beyond request timeout and trigger a sweep/top-up
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let effects = pm.test_sweep_timeouts_and_topup();
+
+        // Expect a new FindValue to the third peer
+        let mut sent_to_p3 = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == SocketAddr::new(p3.ip_address, p3.udp_port) {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindValue { .. }) {
+                            sent_to_p3 = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(sent_to_p3, "timeout should top up to next closest peer");
+    }
+
+    #[tokio::test]
+    async fn test_nodes_reply_triggers_topup_to_new_candidate() {
+        // Arrange: alpha=2, two initial peers near the target
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8094);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 2);
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let p1 = make_peer(1, 7001, 0x00); // closest
+        let p2 = make_peer(2, 7002, 0x01); // next
+        let p_new = make_peer(3, 7003, 0x02); // new candidate introduced by p1
+
+        // Helper to absorb possible splits while inserting
+        let mut insert = |peer: NodeInfo| {
+            loop {
+                match pm.node.routing_table.try_insert(peer) {
+                    InsertResult::SplitOccurred => continue,
+                    _ => break,
+                }
+            }
+        };
+        insert(p1);
+        insert(p2);
+
+        // Start the lookup for this target
+        let key = Key(target.0);
+        let src_id: NodeID = NodeID::new();
+        let start = Message::StartLookup { node_id: src_id, key };
+        let src: SocketAddr = "127.0.0.1:4300".parse().unwrap();
+        let _ = pm.handle_message(start, src).await.unwrap();
+
+        // Act: simulate a Nodes reply from p1 that introduces p_new
+        let nodes_msg = Message::Nodes {
+            node_id: p1.node_id,
+            target,
+            nodes: vec![p_new],
+        };
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let effects = pm.handle_message(nodes_msg, p1_addr).await.unwrap();
+
+        // Assert: expect a FindValue sent to p_new to top up concurrency
+        let mut sent_to_new = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == SocketAddr::new(p_new.ip_address, p_new.udp_port) {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindValue { .. }) {
+                            sent_to_new = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            sent_to_new,
+            "Nodes reply should trigger a top-up FindValue to the newly introduced candidate"
+        );
+    }
+}
+
+// Test-only hook to drive timeout sweeps without the async run loop.
+#[cfg(test)]
+impl ProtocolManager {
+    fn test_sweep_timeouts_and_topup(&mut self) -> Vec<Effect> {
+        // Placeholder: production code should sweep per-request deadlines,
+        // then call the same top-up logic and return the resulting effects.
+        Vec::new()
     }
 }

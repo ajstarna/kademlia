@@ -1,17 +1,61 @@
 - probe unit test for timeout and returned
+
 - lookup state machine for values and nodes
+    - failing tests from codex help exist.
     - it has its target (for a find value or find node call)
     - when we get nodes back, do the whole recursive alpha thing
-    - also need timeouts
+    - also need timeouts per request
     - when we get a value back, we are done? (send it back to the channel; see bellow)
+    - a method on Lookup can populate in_flight to alpha and return a Vec of Effects. This can be called to start a lookup and also when
+        Nodes messsages come back and we need to up-up, or when we have a time out.
+    -  double check the paper on the condition of us ending. I think its if the top k in short_list have already been queried or someting
+
+
+###################### from codex  #######################
+
+> Short version
+
+  - Node lookup (FIND_NODE): returns the k closest NodeInfo to the target NodeID that the lookup discovered when it converged.
+  - Value lookup (FIND_VALUE):
+      - If any peer returns a ValueFound: return the value immediately (success).
+      - If no value is found after convergence: return NotFound together with the k closest NodeInfo to the key’s NodeID.
+
+  Recommended return shape
+
+  - For a library API, something like:
+      - For node lookups:
+      - Vec<NodeInfo> ordered by distance to target, length ≤ k.
+  - For value lookups:
+      - Either Value on success
+      - Or NotFound { closest: Vec<NodeInfo> } on convergence without a value
+
+  Termination conditions
+
+  - FIND_VALUE: done as soon as a ValueFound is received; otherwise same convergence rule as FIND_NODE.
+  - FIND_NODE (and FIND_VALUE NotFound case): done when
+      - in_flight is empty, and
+      - every node in the current best-k short_list has been contacted (queried contains all short_list IDs).
+      - Optionally, early-exit if a round yields no closer nodes than the closest seen (classic Kademlia “no progress” rule).
+
+  Operational notes
+
+  - Keep short_list as the best-k by distance; don’t remove contacted nodes—prune by sorting and truncating to k after merges.
+  - Track queried and in_flight to control who you send to and enforce alpha.
+  - On ValueFound you may also optionally “cache on path” by STORE-ing to some/closest nodes, but that’s a later optimization.
+
+####################################################
+
 - ability for an application to talk to the protocol manager via some API. Basically with a store and get method
     - i think make the DHT a library, and the user would spawn run in a tokio async task then talk to it via a channel.
     - maybe a new KademliaDHT struct that inside its new() it spawns a tokio task to run the protocol manager? And returns
     the channel handle for the user? So the user can interact with the DHT without worrying about the PM running on a task?
     Is this how things are handles? Alternatively the user of the lib would need to run their own task and stuff.
     - have a binary crate along with the library
+
 - bootstrap nodes
+
 - joining the network (there is a described process of requesting yourself or something like that)
+
 - test framework for running multiple nodes.
     - Could this include some unit tests with two protocol managers? Mock sockets right?
         - actually maybe just two DHTs as implemented in the above TODO

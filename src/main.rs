@@ -2,6 +2,8 @@ use tokio::net::UdpSocket;
 
 mod node;
 mod protocol;
+#[cfg(test)]
+mod test_support;
 
 use node::Node;
 use protocol::ProtocolManager;
