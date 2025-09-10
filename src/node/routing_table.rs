@@ -47,30 +47,34 @@ impl KBucket {
     /// If it exists, we update its info.
     /// If the bucket is full, we signal for a probe on the LRU peer, else we add to the front as the new MRU
     pub fn upsert(&mut self, peer: NodeInfo) -> InsertResult {
-	if let Some(pos) = self.node_infos.iter().position(|n| n.node_id == peer.node_id) {
+        if let Some(pos) = self
+            .node_infos
+            .iter()
+            .position(|n| n.node_id == peer.node_id)
+        {
             // Remove the existing node
             let mut node = self.node_infos.remove(pos).unwrap();
 
             if node == peer {
-		// No field changes, just move to MRU
-		self.node_infos.push_front(node);
-		InsertResult::AlreadyPresent
+                // No field changes, just move to MRU
+                self.node_infos.push_front(node);
+                InsertResult::AlreadyPresent
             } else {
-		// Update contact info + move to MRU
-		node.ip_address = peer.ip_address;
-		node.udp_port = peer.udp_port;
-		self.node_infos.push_front(node);
-		InsertResult::Updated
+                // Update contact info + move to MRU
+                node.ip_address = peer.ip_address;
+                node.udp_port = peer.udp_port;
+                self.node_infos.push_front(node);
+                InsertResult::Updated
             }
-	} else if self.is_full() {
+        } else if self.is_full() {
             // Return eviction candidate
             let lru = self.node_infos.back().unwrap().clone();
             InsertResult::Full { lru }
-	} else {
+        } else {
             // Insert as MRU
             self.node_infos.push_front(peer);
             InsertResult::Inserted
-	}
+        }
     }
 
     // Remove the peer with the given node_id if it exists
@@ -177,9 +181,9 @@ fn split_bucket(bucket: KBucket, k: usize) -> (Box<BucketTree>, Box<BucketTree>,
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InsertResult {
-    Inserted,       // normal insertion
-    AlreadyPresent, // exact nodeinfo already exists
-    Updated,        // The node_id existed but with different contact info
+    Inserted,               // normal insertion
+    AlreadyPresent,         // exact nodeinfo already exists
+    Updated,                // The node_id existed but with different contact info
     Full { lru: NodeInfo }, // a bucket can say it is full and give the lru in case a probe is needed
     SplitOccurred,
 }
@@ -348,7 +352,7 @@ impl RoutingTable {
                 } else {
                     (
                         BucketTree::Bucket(bucket),
-			result  // forward the `Full` result to the protocol for a probe
+                        result, // forward the `Full` result to the protocol for a probe
                     )
                 }
             }
@@ -360,13 +364,13 @@ impl RoutingTable {
     /// If alive, we keep the lru entry in the bucket and update its status.
     /// If dead, then we remove it from the bucket and complete the original insertion
     pub fn resolve_probe(&mut self, peer: NodeInfo, alive: bool) {
-	if alive {
+        if alive {
             // treat like a fresh contact → move to MRU
             let _ = self.try_insert(peer);
-	} else {
+        } else {
             // drop the peer entirely
             self.remove_peer(peer.node_id);
-	}
+        }
     }
 }
 
@@ -496,61 +500,55 @@ mod test {
         assert_eq!(rt.count_buckets(), 2);
     }
 
-
     /// Test that k_closest works, even in the case where it needs to get k nodes
     /// from across more than one bucket.
     #[test]
     fn k_closest() {
-	let my_id: NodeID = id_with_first_byte(0x80); // MSB = 1
-	let k: usize = 2;
-	let mut rt: RoutingTable = RoutingTable::new(my_id, k);
+        let my_id: NodeID = id_with_first_byte(0x80); // MSB = 1
+        let k: usize = 2;
+        let mut rt: RoutingTable = RoutingTable::new(my_id, k);
 
-	// Helper to absorb SplitOccurred
-	let mut insert = |peer: NodeInfo| {
-            loop {
-		match rt.try_insert(peer) {
-                    InsertResult::SplitOccurred => continue,
-                    _ => break,
-		}
+        // Helper to absorb SplitOccurred
+        let mut insert = |peer: NodeInfo| loop {
+            match rt.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
             }
-	};
+        };
 
-	// Two near-side peers (MSB=1)
-	let near1: NodeInfo = make_peer(1, 4001, 0x81);
-	let near2: NodeInfo = make_peer(2, 4002, 0x82);
-	insert(near1);
-	insert(near2);
+        // Two near-side peers (MSB=1)
+        let near1: NodeInfo = make_peer(1, 4001, 0x81);
+        let near2: NodeInfo = make_peer(2, 4002, 0x82);
+        insert(near1);
+        insert(near2);
 
-	// One far-side peer (MSB=0) → causes split
-	let far: NodeInfo = make_peer(3, 4003, 0x01);
-	insert(far);
+        // One far-side peer (MSB=0) → causes split
+        let far: NodeInfo = make_peer(3, 4003, 0x01);
+        insert(far);
 
-	// Sanity: should have two buckets now
-	assert_eq!(rt.count_buckets(), 2);
+        // Sanity: should have two buckets now
+        assert_eq!(rt.count_buckets(), 2);
 
+        // Case 1: Pick a target closer to the two near nodes, i.e. a single bucket
+        let target: NodeID = id_with_first_byte(0xA0);
 
-	// Case 1: Pick a target closer to the two near nodes, i.e. a single bucket
-	let target: NodeID = id_with_first_byte(0xA0);
+        let closest: Vec<NodeInfo> = rt.k_closest(target);
+        assert_eq!(closest.len(), k);
 
-	let closest: Vec<NodeInfo> = rt.k_closest(target);
-	assert_eq!(closest.len(), k);
+        let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
+        assert!(ids.contains(&near1.node_id));
+        assert!(ids.contains(&near2.node_id));
 
-	let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
-	assert!(ids.contains(&near1.node_id));
-	assert!(ids.contains(&near2.node_id));
+        // Case 2: Pick a target closer to the far peer than to near nodes
+        // We will need results from more than one bucket
+        let target: NodeID = id_with_first_byte(0x00);
 
+        let closest: Vec<NodeInfo> = rt.k_closest(target);
+        assert_eq!(closest.len(), k);
 
-	// Case 2: Pick a target closer to the far peer than to near nodes
-	// We will need results from more than one bucket
-	let target: NodeID = id_with_first_byte(0x00);
-
-	let closest: Vec<NodeInfo> = rt.k_closest(target);
-	assert_eq!(closest.len(), k);
-
-	let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
-	assert!(ids.contains(&far.node_id));
-	// near1 is closer than near2 to the target
-	assert!(ids.contains(&near1.node_id));
+        let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
+        assert!(ids.contains(&far.node_id));
+        // near1 is closer than near2 to the target
+        assert!(ids.contains(&near1.node_id));
     }
-
 }

@@ -6,7 +6,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-
 /// The ID corresponding to an attempted insert on a full K bucket.
 /// A probe is sent out to the LRU, and if they do not respond in time,
 /// then we boot them from the bucket and finish the new insertion.
@@ -20,7 +19,6 @@ impl ProbeID {
         Self(val)
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeID(pub H160);
@@ -99,10 +97,8 @@ impl BitXor for NodeID {
     }
 }
 
-
 /// Kademlia treats keys and NodeIDs identically
 pub type Key = NodeID;
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Distance(H160);
