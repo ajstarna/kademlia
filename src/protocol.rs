@@ -711,7 +711,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_nodes_reply_topups_lookup() {
+    async fn test_nodes_reply_tops_up_lookup() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8091);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
@@ -767,7 +767,7 @@ mod test {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_lookup_timeout_topups() {
+    async fn test_lookup_timeout_tops_up() {
         // Alpha=2, 3 peers → expect 2 initial requests, then after timeout a top-up to the 3rd
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8092);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -831,7 +831,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_nodes_reply_triggers_topup_to_new_candidate() {
+    async fn test_nodes_reply_triggers_top_ups_to_new_candidate() {
         // Arrange: alpha=2, two initial peers near the target
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8094);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
