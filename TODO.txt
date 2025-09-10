@@ -1,49 +1,12 @@
 - probe unit test for timeout and returned
 
 - lookup state machine for values and nodes
-    - failing tests from codex help exist.
-    - it has its target (for a find value or find node call)
-    - when we get nodes back, do the whole recursive alpha thing
     - also need timeouts per request
     - when we get a value back, we are done? (send it back to the channel; see bellow)
-    - a method on Lookup can populate in_flight to alpha and return a Vec of Effects. This can be called to start a lookup and also when
-        Nodes messsages come back and we need to up-up, or when we have a time out.
     -  double check the paper on the condition of us ending. I think its if the top k in short_list have already been queried or someting
+        - handle the end of lookups this way. Probably happens if we get nodes back, call top_up, and there are no effects?
 
-
-###################### from codex  #######################
-
-> Short version
-
-  - Node lookup (FIND_NODE): returns the k closest NodeInfo to the target NodeID that the lookup discovered when it converged.
-  - Value lookup (FIND_VALUE):
-      - If any peer returns a ValueFound: return the value immediately (success).
-      - If no value is found after convergence: return NotFound together with the k closest NodeInfo to the key’s NodeID.
-
-  Recommended return shape
-
-  - For a library API, something like:
-      - For node lookups:
-      - Vec<NodeInfo> ordered by distance to target, length ≤ k.
-  - For value lookups:
-      - Either Value on success
-      - Or NotFound { closest: Vec<NodeInfo> } on convergence without a value
-
-  Termination conditions
-
-  - FIND_VALUE: done as soon as a ValueFound is received; otherwise same convergence rule as FIND_NODE.
-  - FIND_NODE (and FIND_VALUE NotFound case): done when
-      - in_flight is empty, and
-      - every node in the current best-k short_list has been contacted (queried contains all short_list IDs).
-      - Optionally, early-exit if a round yields no closer nodes than the closest seen (classic Kademlia “no progress” rule).
-
-  Operational notes
-
-  - Keep short_list as the best-k by distance; don’t remove contacted nodes—prune by sorting and truncating to k after merges.
-  - Track queried and in_flight to control who you send to and enforce alpha.
-  - On ValueFound you may also optionally “cache on path” by STORE-ing to some/closest nodes, but that’s a later optimization.
-
-####################################################
+    - do we need unit tests with smaller values of k? for now i set k to 20 in all of them, but i guess that means no truncation.
 
 - ability for an application to talk to the protocol manager via some API. Basically with a store and get method
     - i think make the DHT a library, and the user would spawn run in a tokio async task then talk to it via a channel.

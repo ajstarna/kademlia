@@ -94,6 +94,7 @@ struct PendingProbe {
 }
 
 struct Lookup {
+    k: usize,
     alpha: usize,
     my_node_id: NodeID,
     // keep the target as a NodeID, even though sometimes it is a key
@@ -106,13 +107,16 @@ struct Lookup {
 }
 
 impl Lookup {
-    pub fn new(alpha: usize, my_node_id: NodeID, target: NodeID, kind: LookupKind, initial_candidates: Vec<NodeInfo>) -> Self {
+    pub fn new(k: usize, alpha: usize, my_node_id: NodeID, target: NodeID, kind: LookupKind, initial_candidates: Vec<NodeInfo>) -> Self {
+	let mut short_list = initial_candidates;
+	short_list.sort_by_key(|n| n.node_id.distance(&target));
         Lookup {
+	    k,
 	    alpha,
 	    my_node_id,
             target,
 	    kind,
-            short_list: initial_candidates,
+            short_list,
             already_queried: HashSet::new(),
             in_flight: HashMap::new(),
         }
@@ -123,7 +127,6 @@ impl Lookup {
     /// If there are fewer than `alpha` queries in flight, we return Effects to top up the difference.
     /// This can be called when we first start a lookup, or when we drive it forward after receiving a Nodes message.
     pub fn top_up_alpha_requests(&mut self) -> Vec<Effect> {
-
 	let mut effects = Vec::new();
 
 	// find up to alpha candidate nodes that we haven't already sent a query to
@@ -134,14 +137,7 @@ impl Lookup {
 	    .cloned()
 	    .collect();
 
-
 	for info in available {
-	    if self.already_queried.contains(&info.node_id) {
-		continue
-	    }
-	    if self.in_flight.contains_key(&info.node_id) {
-		continue
-	    }
 	    let query = match self.kind {
 		LookupKind::Node => {
 		    Message::FindNode {
@@ -165,8 +161,31 @@ impl Lookup {
 	    // now set a deadline and add to in flight
 	    let deadline = Instant::now() + LOOKUP_TIMEOUT;
 	    self.in_flight.insert(info.node_id, deadline);
+	    self.already_queried.insert(info.node_id);
 	}
 	effects
+    }
+
+
+
+    /// A Nodes response message for this lookup was received.
+    /// We merge them into our existing shortlist, sort by distance to the target, then only
+    /// keep the top k.
+    pub fn merge_new_nodes(&mut self, nodes: Vec<NodeInfo>) {
+	self.short_list.extend(nodes);
+
+	let mut seen = HashSet::new();
+	self.short_list.retain(|n| seen.insert(n.node_id));
+
+	// sort by distance to target
+	self.short_list.sort_by_key(|n| n.node_id.distance(&self.target));
+
+	println!("{0:?}", self.short_list);
+	println!("\n{0:?}", self.in_flight);
+	if self.short_list.len() > self.k {
+            self.short_list.truncate(self.k);
+	}
+
     }
 }
 
@@ -178,16 +197,17 @@ struct PendingLookup {
 pub struct ProtocolManager {
     pub node: Node,
     pub socket: UdpSocket,
+    pub k: usize,
     pub alpha: usize, // concurrency parameter
     pub pending_probes: HashMap<ProbeID, PendingProbe>,
     pub pending_lookups: HashMap<NodeID, PendingLookup>,
 }
 
 impl ProtocolManager {
-    pub fn new(node: Node, socket: UdpSocket, alpha: usize) -> Self {
+    pub fn new(node: Node, socket: UdpSocket, k: usize, alpha: usize) -> Self {
         let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
         let pending_lookups: HashMap<NodeID, PendingLookup> = HashMap::new();
-        Self { node, socket, alpha, pending_probes, pending_lookups }
+        Self { node, socket, k, alpha, pending_probes, pending_lookups }
     }
 
     fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> Option<Effect> {
@@ -288,14 +308,27 @@ impl ProtocolManager {
                 nodes,
             } => {
 		// observe all the new nodes we just learned about
-		for n in nodes {
+		for n in &nodes {
 		    if let Some(eff) = self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id) {
 			effects.push(eff);
 		    }
 		}
 
-		// TODO: the target should correspond to a pending lookup right?
+		if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
+		    pending_lookup.lookup.in_flight.remove(&node_id);
+		    pending_lookup.lookup.merge_new_nodes(nodes);
 
+		    let lookup_effects = pending_lookup.lookup.top_up_alpha_requests();
+		    effects.extend(lookup_effects);
+
+		    /*
+		    if pending_lookup.lookup.is_finished() {
+			let result = pending_lookup.lookup.short_list.clone();
+			self.pending_lookups.remove(&target);  // cleanup
+			// TODO: return to the user via the channel when that exists
+		     }
+		     */
+		}
 		node_id
             }
 
@@ -335,14 +368,16 @@ impl ProtocolManager {
                 value,
             } => {
 
-		if let Some(lookup) = self.pending_lookups.get_mut(&key) {
-		    // TODO: the target should correspond to a pending lookup right?
-		    todo!()
-		    // lookup.complete_with_value(value.clone());
+		if let Some(_pending_lookup) = self.pending_lookups.remove(&key) {
+		    // we drop the lookup entirely
+		    println!("Lookup for {key:?} completed with value from {node_id:?}");
 		}
 
 		// Optionally Cache the value in our own local storage
 		self.node.store(key, value);
+
+		// TODO: once we have a user DHT channel most likely, we should set the value back to them here I think.
+
 		node_id
             }
 
@@ -350,12 +385,10 @@ impl ProtocolManager {
 	    // eventually we will receive commands from our user.
 	    Message::StartLookup { node_id, key, kind } => {
 		let initial = self.node.routing_table.k_closest(key);
-		let mut lookup = Lookup::new(self.alpha, self.node.my_info.node_id, key, kind, initial);
+		let mut lookup = Lookup::new(self.k, self.alpha, self.node.my_info.node_id, key, kind, initial);
 
 		let lookup_effects = lookup.top_up_alpha_requests();
-		println!("\n\n\n{lookup_effects:?}");
 		effects.extend(lookup_effects);
-
 
 		let deadline = Instant::now() + LOOKUP_TIMEOUT;
 		self.pending_lookups.insert(key, PendingLookup{ lookup, deadline });
@@ -464,7 +497,7 @@ mod test {
     async fn test_receive_ping() {
         let node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
         let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-        let mut pm = ProtocolManager::new(node, dummy_socket, 3);
+        let mut pm = ProtocolManager::new(node, dummy_socket, 20, 3);
 
         let src_id = NodeID::new();
 	let probe_id= ProbeID::new_random();
@@ -496,7 +529,7 @@ mod test {
     async fn test_receive_store_and_find_value() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
 
         let src_id: NodeID = NodeID::new();
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -558,7 +591,7 @@ mod test {
     async fn test_receive_find_value_found() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8082);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
 
         // Insert a value into this node's storage directly
         let key: Key = NodeID::from_hashed(&"world");
@@ -595,7 +628,7 @@ mod test {
     async fn test_receive_find_value_nodes() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8083);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
 
         let key: Key = NodeID::from_hashed(&"missing");
 
@@ -634,7 +667,7 @@ mod test {
     async fn test_start_lookup_sends_alpha_queries() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8090);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
 
         // Prepare peers with known distances to the target
         let target: NodeID = id_with_first_byte(0x00);
@@ -714,7 +747,7 @@ mod test {
     async fn test_nodes_reply_tops_up_lookup() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8091);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 6001, 0x00);
@@ -771,7 +804,7 @@ mod test {
         // Alpha=2, 3 peers → expect 2 initial requests, then after timeout a top-up to the 3rd
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8092);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 2);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 6101, 0x00); // closest
@@ -835,7 +868,7 @@ mod test {
         // Arrange: alpha=2, two initial peers near the target
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8094);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 2);
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 7001, 0x00); // closest
