@@ -14,7 +14,13 @@ use std::time::Instant;
 
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LookupKind {
+    Node, // FIND_NODE
+    Value, // FIND_VALUE
+}
 
 // each message type includes the NodeID of the sender
 #[derive(Serialize, Deserialize, Debug)]
@@ -57,6 +63,7 @@ enum Message {
     StartLookup {
         node_id: NodeID,
         key: Key,
+	kind: LookupKind,
     },
 
 }
@@ -87,27 +94,85 @@ struct PendingProbe {
 }
 
 struct Lookup {
-    // keep the target as a NodeID, even thought sometimes it is a
+    alpha: usize,
+    my_node_id: NodeID,
+    // keep the target as a NodeID, even though sometimes it is a key
+    // TODO: do we need an enum or anything for the two types of lookups?
     target: NodeID,
+    kind: LookupKind,
     short_list: Vec<NodeInfo>,
-    queried: HashSet<NodeID>, // indicate who we have sent a request to already
-    in_flight: HashMap<ProbeID, NodeInfo>, // active queries
+    already_queried: HashSet<NodeID>, // indicate who we have sent a request to already
+    in_flight: HashMap<NodeID, Instant>, // active queries with deadlines
 }
 
 impl Lookup {
-    pub fn new(target: NodeID, initial_candidates: Vec<NodeInfo>) -> Self {
+    pub fn new(alpha: usize, my_node_id: NodeID, target: NodeID, kind: LookupKind, initial_candidates: Vec<NodeInfo>) -> Self {
         Lookup {
+	    alpha,
+	    my_node_id,
             target,
+	    kind,
             short_list: initial_candidates,
-            queried: HashSet::new(),
+            already_queried: HashSet::new(),
             in_flight: HashMap::new(),
         }
+    }
+
+
+    /// main method to be called on a lookup struct
+    /// If there are fewer than `alpha` queries in flight, we return Effects to top up the difference.
+    /// This can be called when we first start a lookup, or when we drive it forward after receiving a Nodes message.
+    pub fn top_up_alpha_requests(&mut self) -> Vec<Effect> {
+
+	let mut effects = Vec::new();
+
+	// find up to alpha candidate nodes that we haven't already sent a query to
+	let available: Vec<_> = self.short_list.iter()
+	    .filter(|c| !self.already_queried.contains(&c.node_id))
+	    .filter(|c| !self.in_flight.contains_key(&c.node_id))
+	    .take(self.alpha - self.in_flight.len())
+	    .cloned()
+	    .collect();
+
+
+	for info in available {
+	    if self.already_queried.contains(&info.node_id) {
+		continue
+	    }
+	    if self.in_flight.contains_key(&info.node_id) {
+		continue
+	    }
+	    let query = match self.kind {
+		LookupKind::Node => {
+		    Message::FindNode {
+			node_id: self.my_node_id,
+			target: self.target,
+		    }
+		}
+		LookupKind::Value => {
+		    Message::FindValue {
+			node_id: self.my_node_id,
+			key: self.target,
+		    }
+		}
+	    };
+            let bytes = rmp_serde::to_vec(&query).expect("serialize FindNode");
+            effects.push(Effect::Send {
+                addr: SocketAddr::new(info.ip_address, info.udp_port),
+                bytes,
+            });
+
+	    // now set a deadline and add to in flight
+	    let deadline = Instant::now() + LOOKUP_TIMEOUT;
+	    self.in_flight.insert(info.node_id, deadline);
+	}
+	effects
     }
 }
 
 struct PendingLookup {
     lookup: Lookup,
-    deadline: Instant,
+    deadline: Instant, // TODO: does a lookup itself need a deadline, or are the in flight request timeouts sufficient?
 }
 
 pub struct ProtocolManager {
@@ -151,7 +216,7 @@ impl ProtocolManager {
                     return Some(Effect::StartProbe { peer:lru, probe_id, bytes });
 		}
 		// TODO: check if we care about other insert result variants
-                other => break None,
+                _other => break None,
             }
         }
     }
@@ -250,10 +315,10 @@ impl ProtocolManager {
                     });
                 } else {
                     // we don't hold the value itself, so we need to check for nodes closer to to the key
-                    let closest = self.node.routing_table.k_closest(key.to_node_id());
+                    let closest = self.node.routing_table.k_closest(key);
                     let nodes = Message::Nodes {
                         node_id: self.node.my_info.node_id,
-                        target: key.to_node_id(),
+                        target: key,
                         nodes: closest,
                     };
                     let bytes = rmp_serde::to_vec(&nodes)?;
@@ -269,9 +334,8 @@ impl ProtocolManager {
                 key,
                 value,
             } => {
-		let target = key.to_node_id();
 
-		if let Some(lookup) = self.pending_lookups.get_mut(&target) {
+		if let Some(lookup) = self.pending_lookups.get_mut(&key) {
 		    // TODO: the target should correspond to a pending lookup right?
 		    todo!()
 		    // lookup.complete_with_value(value.clone());
@@ -284,11 +348,17 @@ impl ProtocolManager {
 
 	    // TODO: this is code for developing the lookup functionality
 	    // eventually we will receive commands from our user.
-	    Message::StartLookup { node_id, key } => {
-		let initial = self.node.routing_table.k_closest(key.to_node_id());
-		let lookup = Lookup::new(key.to_node_id(), initial);
+	    Message::StartLookup { node_id, key, kind } => {
+		let initial = self.node.routing_table.k_closest(key);
+		let mut lookup = Lookup::new(self.alpha, self.node.my_info.node_id, key, kind, initial);
+
+		let lookup_effects = lookup.top_up_alpha_requests();
+		println!("\n\n\n{lookup_effects:?}");
+		effects.extend(lookup_effects);
+
+
 		let deadline = Instant::now() + LOOKUP_TIMEOUT;
-		self.pending_lookups.insert(key.to_node_id(), PendingLookup{ lookup, deadline });
+		self.pending_lookups.insert(key, PendingLookup{ lookup, deadline });
 		node_id
 	    }
         };
@@ -433,7 +503,7 @@ mod test {
 
         // let the key be the hash of the value.
         // TODO: figure out if we want to mandate this or allow collisions
-        let key = Key::new(&"world");
+        let key: Key = NodeID::from_hashed(&"world");
         let value = b"world".to_vec();
         let store_msg = Message::Store {
             node_id: src_id,
@@ -491,7 +561,7 @@ mod test {
         let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
 
         // Insert a value into this node's storage directly
-        let key = Key::new(&b"hello");
+        let key: Key = NodeID::from_hashed(&"world");
         let value = b"world".to_vec();
         pm.node.store(key, value.clone());
 
@@ -527,7 +597,7 @@ mod test {
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
 
-        let key = Key::new(&b"missing");
+        let key: Key = NodeID::from_hashed(&"missing");
 
         // Send FindValue for a key that isn't in storage
         let src_id: NodeID = NodeID::new();
@@ -551,7 +621,7 @@ mod test {
                 // the node that made the request got added to the tree
                 assert!(matches!(reply,
                          Message::Nodes { target, .. }
-                         if target == key.to_node_id())
+                         if target == key)
                 );
             }
             _ => panic!("expected Send Nodes effect, got {:?}", effect),
@@ -561,7 +631,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_start_lookup_sends_alpha_findvalue() {
+    async fn test_start_lookup_sends_alpha_queries() {
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8090);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 3);
@@ -588,9 +658,9 @@ mod test {
         insert(p4);
 
         // Start the lookup
-        let key = Key(target.0);
+        let key: Key = NodeID(target.0);
         let src_id: NodeID = NodeID::new();
-        let msg = Message::StartLookup { node_id: src_id, key };
+        let msg = Message::StartLookup { node_id: src_id, key, kind: LookupKind::Value };
         let src: SocketAddr = "127.0.0.1:4002".parse().unwrap();
 
         let effects = pm.handle_message(msg, src).await.unwrap();
@@ -617,6 +687,27 @@ mod test {
         .into_iter()
         .collect();
         assert_eq!(set, expected);
+
+
+	// start a new lookup on nodes and confirm we get FindNode messages instead
+	let msg = Message::StartLookup { node_id: src_id, key, kind: LookupKind::Node };
+        let src: SocketAddr = "127.0.0.1:4002".parse().unwrap();
+
+        let effects = pm.handle_message(msg, src).await.unwrap();
+
+        // Collect sends and decode; should be alpha sends to the three closest peers
+        let mut dests = Vec::new();
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(reply) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if matches!(reply, Message::FindValue { .. }) {
+                        dests.push(addr);
+                    }
+                }
+            }
+        }
+
+
     }
 
     #[tokio::test]
@@ -643,9 +734,9 @@ mod test {
         insert(p3);
 
         // Start the lookup
-        let key = Key(target.0);
+        let key: Key = NodeID(target.0);
         let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup { node_id: src_id, key };
+        let start = Message::StartLookup { node_id: src_id, key, kind: LookupKind::Value };
         let src: SocketAddr = "127.0.0.1:4100".parse().unwrap();
         let _ = pm.handle_message(start, src).await.unwrap();
 
@@ -701,9 +792,9 @@ mod test {
         insert(p3);
 
         // Start lookup: should send 2 initial FindValue requests (alpha=2)
-        let key = Key(target.0);
+        let key: Key = NodeID(target.0);
         let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup { node_id: src_id, key };
+        let start = Message::StartLookup { node_id: src_id, key, kind: LookupKind::Value };
         let src: SocketAddr = "127.0.0.1:4200".parse().unwrap();
         let effects = pm.handle_message(start, src).await.unwrap();
 
@@ -764,9 +855,9 @@ mod test {
         insert(p2);
 
         // Start the lookup for this target
-        let key = Key(target.0);
+        let key: Key = NodeID(target.0);
         let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup { node_id: src_id, key };
+        let start = Message::StartLookup { node_id: src_id, key, kind: LookupKind::Value };
         let src: SocketAddr = "127.0.0.1:4300".parse().unwrap();
         let _ = pm.handle_message(start, src).await.unwrap();
 

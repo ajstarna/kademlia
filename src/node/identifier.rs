@@ -6,22 +6,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Key(pub H160);
-
-impl Key {
-    /// Return a new Key given an input, likely a string.
-    pub fn new<S: AsRef<[u8]>>(input: &S) -> Self {
-        let mut hasher = Sha1::new();
-        hasher.update(input.as_ref());
-        let digest = hasher.finalize();
-        Self(H160::from_slice(&digest))
-    }
-
-    pub fn to_node_id(&self) -> NodeID {
-        NodeID(self.0)
-    }
-}
 
 /// The ID corresponding to an attempted insert on a full K bucket.
 /// A probe is sent out to the LRU, and if they do not respond in time,
@@ -49,6 +33,19 @@ impl NodeID {
 
     pub fn zero() -> Self {
         NodeID(H160::zero())
+    }
+
+    /// Create a NodeID from raw bytes (no hashing).
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(H160::from_slice(bytes))
+    }
+
+    /// Create a NodeID by hashing arbitrary input (e.g. for DHT keys).
+    pub fn from_hashed<S: AsRef<[u8]>>(input: &S) -> Self {
+        let mut hasher = Sha1::new();
+        hasher.update(input.as_ref());
+        let digest = hasher.finalize();
+        Self(H160::from_slice(&digest))
     }
 
     pub fn get_bit_at(&self, bit_index: usize) -> u8 {
@@ -101,6 +98,11 @@ impl BitXor for NodeID {
         NodeID(self.0 ^ rhs.0)
     }
 }
+
+
+/// Kademlia treats keys and NodeIDs identically
+pub type Key = NodeID;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Distance(H160);
