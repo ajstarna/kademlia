@@ -2,12 +2,14 @@
 
 - lookup state machine for values and nodes
     - also need timeouts per request
-    - when we get a value back, we are done? (send it back to the channel; see bellow)
-    -  double check the paper on the condition of us ending. I think its if the top k in short_list have already been queried or someting
+    - when we get a value back, we are done? (send it back to the channel; see below)
+    -  double check the paper on the condition of us ending.
+    I think it's if the top k in short_list have already been queried or someting.
         - handle the end of lookups this way. Probably happens if we get nodes back, call top_up, and there are no effects?
 
     - do we need unit tests with smaller values of k? for now i set k to 20 in all of them, but i guess that means no truncation.
-        - maybe a nice big test with a small k, so we need multiple hops. Have a find value that needs to get a couple rounds of nodes back,
+        - maybe a nice big test with a small k, so we need multiple hops.
+	Have a find value that needs to get a couple rounds of nodes back,
 	some truncation, eventually get the value. Maybe codex can help write this.
 
 - ability for an application to talk to the protocol manager via some API. Basically with a store and get method

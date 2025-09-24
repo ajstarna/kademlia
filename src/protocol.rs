@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
-use tokio::time::{interval, Duration, MissedTickBehavior};
+use tokio::time::{interval, Duration, Instant, MissedTickBehavior};
 
 use crate::{
     node::identifier::{Key, NodeID, NodeInfo, ProbeID},
@@ -10,7 +10,7 @@ use crate::{
     node::Node,
 };
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+//use std::time::Instant;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -95,7 +95,6 @@ struct Lookup {
     alpha: usize,
     my_node_id: NodeID,
     // keep the target as a NodeID, even though sometimes it is a key
-    // TODO: do we need an enum or anything for the two types of lookups?
     target: NodeID,
     kind: LookupKind,
     short_list: Vec<NodeInfo>,
@@ -123,6 +122,19 @@ impl Lookup {
             short_list,
             already_queried: HashSet::new(),
             in_flight: HashMap::new(),
+        }
+    }
+
+    /// Check if any of the in-flight queries have timed-out, and if so, remove them.
+    pub fn sweep_expired(&mut self, now: Instant) {
+        let mut expired = Vec::new();
+        for (key, deadline) in self.in_flight.iter() {
+            if *deadline <= now {
+                expired.push(*key);
+            }
+        }
+        for key in expired {
+            self.in_flight.remove(&key);
         }
     }
 
@@ -450,12 +462,40 @@ impl ProtocolManager {
         }
     }
 
+    /// check for and resolve expired probes, and check for expired lookups.
+    /// Returns the possible new topup requests if there were expired lookups.
+    fn sweep_timeouts_and_topup(&mut self, now: Instant) -> Vec<Effect> {
+        let mut expired_probes = Vec::new();
+        for (probe_id, pending_probe) in self.pending_probes.iter() {
+            if pending_probe.deadline <= now {
+                expired_probes.push((*probe_id, *pending_probe));
+            }
+        }
+        for (probe_id, pending) in expired_probes {
+            self.pending_probes.remove(&probe_id);
+            // tell the table that this probe timed out
+            let _ = self
+                .node
+                .routing_table
+                .resolve_probe(pending.peer, /*alive=*/ false);
+        }
+
+        // each lookup can clear expired lookups and top them up
+        let mut lookup_effects = Vec::new();
+        for (_key, pending_lookup) in self.pending_lookups.iter_mut() {
+            pending_lookup.lookup.sweep_expired(now);
+            let current_effects = pending_lookup.lookup.top_up_alpha_requests();
+            lookup_effects.extend(current_effects);
+        }
+        lookup_effects
+    }
+
     /// This for messages in a loop, and respond accordingly
     pub async fn run(mut self) {
         let mut buf = [0u8; 1024];
 
-        let mut ticker = interval(Duration::from_secs(1)); // how often do we clean expired probes
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut ticker = interval(Duration::from_millis(500)); // how often do we clean expired probes and lookups
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -491,22 +531,14 @@ impl ProtocolManager {
             // TODO: another arm that reads from a channel from the user of the DHT
             // it can start lookups
 
-                // timeout arm (sweep or heap-based)
                 _ = ticker.tick() => {
                     let now = Instant::now();
-                    let mut expired = Vec::new();
-                    for (probe_id, pending) in self.pending_probes.iter() {
-                    if pending.deadline <= now {
-                        expired.push((*probe_id, *pending));
-                    }
-                    }
-                    for (probe_id, pending) in expired {
-                        self.pending_probes.remove(&probe_id);
-                        // tell the table that this probe timed out
-                        let _ = self.node.routing_table.resolve_probe(pending.peer, /*alive=*/false);
+            let lookup_effects = self.sweep_timeouts_and_topup(now);
+
+                    for eff in lookup_effects {
+            self.apply_effect(eff).await;
                     }
 
-            //TODO: also check for expired lookups
                 }
                 }
         }
@@ -750,28 +782,6 @@ mod test {
         .into_iter()
         .collect();
         assert_eq!(set, expected);
-
-        // start a new lookup on nodes and confirm we get FindNode messages instead
-        let msg = Message::StartLookup {
-            node_id: src_id,
-            key,
-            kind: LookupKind::Node,
-        };
-        let src: SocketAddr = "127.0.0.1:4002".parse().unwrap();
-
-        let effects = pm.handle_message(msg, src).await.unwrap();
-
-        // Collect sends and decode; should be alpha sends to the three closest peers
-        let mut dests = Vec::new();
-        for eff in effects.into_iter() {
-            if let Effect::Send { addr, bytes } = eff {
-                if let Ok(reply) = rmp_serde::from_slice::<Message>(&bytes) {
-                    if matches!(reply, Message::FindValue { .. }) {
-                        dests.push(addr);
-                    }
-                }
-            }
-        }
     }
 
     #[tokio::test]
@@ -834,7 +844,7 @@ mod test {
 
     #[tokio::test(start_paused = true)]
     async fn test_lookup_timeout_tops_up() {
-        // Alpha=2, 3 peers → expect 2 initial requests, then after timeout a top-up to the 3rd
+        // Alpha=2, 3 peers → expect 2 initial requests, then after timeout a top-up to the 3rd peer
         let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8092);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
@@ -880,7 +890,9 @@ mod test {
 
         // Advance mocked time beyond request timeout and trigger a sweep/top-up
         tokio::time::advance(Duration::from_secs(3)).await;
-        let effects = pm.test_sweep_timeouts_and_topup();
+        let now = Instant::now();
+
+        let effects = pm.sweep_timeouts_and_topup(now);
 
         // Expect a new FindValue to the third peer
         let mut sent_to_p3 = false;
@@ -958,15 +970,5 @@ mod test {
             sent_to_new,
             "Nodes reply should trigger a top-up FindValue to the newly introduced candidate"
         );
-    }
-}
-
-// Test-only hook to drive timeout sweeps without the async run loop.
-#[cfg(test)]
-impl ProtocolManager {
-    fn test_sweep_timeouts_and_topup(&mut self) -> Vec<Effect> {
-        // Placeholder: production code should sweep per-request deadlines,
-        // then call the same top-up logic and return the resulting effects.
-        Vec::new()
     }
 }
