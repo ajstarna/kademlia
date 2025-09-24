@@ -1084,4 +1084,124 @@ mod test {
         assert!(pm.pending_lookups.get(&key).is_none());
         assert_eq!(pm.node.get(&key), Some(&value));
     }
+
+    #[tokio::test]
+    async fn test_lookup_ends_when_shortlist_unchanged() {
+        // Arrange: alpha=2, two initial peers that are the closest to target
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8097);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let p1 = make_peer(1, 9001, 0x00); // closest
+        let p2 = make_peer(2, 9002, 0x01); // next closest
+
+        // Insert initial candidates into the routing table (absorb splits if they occur)
+        let mut insert = |peer: NodeInfo| loop {
+            match pm.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+        insert(p1);
+        insert(p2);
+
+        // Start a Node lookup towards `target`
+        let src_id: NodeID = NodeID::new();
+        let start = Message::StartLookup {
+            node_id: src_id,
+            key: target, // for Node lookup, the "key" is the NodeID target
+            kind: LookupKind::Node,
+        };
+        let src: SocketAddr = "127.0.0.1:4500".parse().unwrap();
+        let effects = pm.handle_message(start, src).await.unwrap();
+
+        // Expect exactly alpha initial FindNode queries
+        let initial_sends: Vec<SocketAddr> = effects
+            .into_iter()
+            .filter_map(|eff| match eff {
+                Effect::Send { addr, bytes } => {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindNode { .. }) {
+                            return Some(addr);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(initial_sends.len(), 2, "should send alpha FindNode requests");
+
+        // Simulate a Nodes reply from p1 that does not improve the shortlist (duplicates only)
+        let nodes_from_p1 = Message::Nodes {
+            node_id: p1.node_id,
+            target,
+            nodes: vec![p1, p2],
+        };
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let effects = pm.handle_message(nodes_from_p1, p1_addr).await.unwrap();
+
+        // Since one in-flight slot freed but there are no new candidates to try, expect no new FindNode sends
+        let topups_after_p1: Vec<SocketAddr> = effects
+            .into_iter()
+            .filter_map(|eff| match eff {
+                Effect::Send { addr, bytes } => {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindNode { .. }) {
+                            return Some(addr);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(topups_after_p1.is_empty(), "no new queries should be issued");
+
+        // Simulate a Nodes reply from p2 that also does not improve the shortlist
+        let nodes_from_p2 = Message::Nodes {
+            node_id: p2.node_id,
+            target,
+            nodes: vec![p1, p2],
+        };
+        let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
+        let effects = pm.handle_message(nodes_from_p2, p2_addr).await.unwrap();
+
+        // With both queries answered and no shortlist changes, the lookup should end with no further sends
+        let topups_after_p2: Vec<SocketAddr> = effects
+            .into_iter()
+            .filter_map(|eff| match eff {
+                Effect::Send { addr, bytes } => {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindNode { .. }) {
+                            return Some(addr);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(topups_after_p2.is_empty(), "no further queries should be issued");
+
+        // Optional: sweep to mimic periodic maintenance; still no effects expected
+        let effects = pm.sweep_timeouts_and_topup(Instant::now());
+        let find_node_sends = effects
+            .into_iter()
+            .filter(|eff| match eff {
+                Effect::Send { bytes, .. } => {
+                    matches!(rmp_serde::from_slice::<Message>(bytes), Ok(Message::FindNode { .. }))
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(find_node_sends, 0, "no maintenance top-ups should occur");
+
+        // And the lookup should be considered finished (removed)
+        assert!(
+            pm.pending_lookups.get(&target).is_none(),
+            "lookup should be removed once all queries have returned and shortlist is unchanged"
+        );
+    }
 }
