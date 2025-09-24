@@ -971,4 +971,117 @@ mod test {
             "Nodes reply should trigger a top-up FindValue to the newly introduced candidate"
         );
     }
+
+    #[tokio::test]
+    async fn test_value_lookup_multiple_hops_via_nodes() {
+        // Make a lookup that requires multiple jumps: p1 -> p2 -> p3, where p3 returns the value
+        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8096);
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // alpha=1 to force sequential hops
+        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 1);
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let key: Key = NodeID(target.0);
+
+        // Peers increasingly closer to the target
+        let p1 = make_peer(1, 8001, 0x40); // far
+        let p2 = make_peer(2, 8002, 0x10); // closer
+        let p3 = make_peer(3, 8003, 0x00); // closest
+
+        // Insert only p1 initially so the lookup starts there
+        let mut insert = |peer: NodeInfo| loop {
+            match pm.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+        insert(p1);
+
+        // Start the lookup (Value)
+        let src_id: NodeID = NodeID::new();
+        let start = Message::StartLookup {
+            node_id: src_id,
+            key,
+            kind: LookupKind::Value,
+        };
+        let src: SocketAddr = "127.0.0.1:4400".parse().unwrap();
+        let effects = pm.handle_message(start, src).await.unwrap();
+
+        // Expect a FindValue sent to p1
+        let mut sent_to_p1 = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == SocketAddr::new(p1.ip_address, p1.udp_port) {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindValue { .. }) {
+                            sent_to_p1 = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(sent_to_p1, "lookup should start by querying p1");
+
+        // Simulate p1 responding with a Nodes message introducing p2
+        let nodes_from_p1 = Message::Nodes {
+            node_id: p1.node_id,
+            target,
+            nodes: vec![p2],
+        };
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let effects = pm.handle_message(nodes_from_p1, p1_addr).await.unwrap();
+
+        // Expect a top-up FindValue to p2 (alpha=1, slot freed by p1's reply)
+        let mut sent_to_p2 = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == SocketAddr::new(p2.ip_address, p2.udp_port) {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindValue { .. }) {
+                            sent_to_p2 = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(sent_to_p2, "Nodes from p1 should trigger query to p2");
+
+        // Simulate p2 responding with a Nodes message introducing p3
+        let nodes_from_p2 = Message::Nodes {
+            node_id: p2.node_id,
+            target,
+            nodes: vec![p3],
+        };
+        let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
+        let effects = pm.handle_message(nodes_from_p2, p2_addr).await.unwrap();
+
+        // Expect a top-up FindValue to p3
+        let mut sent_to_p3 = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == SocketAddr::new(p3.ip_address, p3.udp_port) {
+                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                        if matches!(msg, Message::FindValue { .. }) {
+                            sent_to_p3 = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(sent_to_p3, "Nodes from p2 should trigger query to p3");
+
+        // Finally, simulate p3 returning the value
+        let value = b"hello-value".to_vec();
+        let found = Message::ValueFound {
+            node_id: p3.node_id,
+            key,
+            value: value.clone(),
+        };
+        let p3_addr = SocketAddr::new(p3.ip_address, p3.udp_port);
+        let _ = pm.handle_message(found, p3_addr).await.unwrap();
+
+        // Lookup should be cleared and value cached locally
+        assert!(pm.pending_lookups.get(&key).is_none());
+        assert_eq!(pm.node.get(&key), Some(&value));
+    }
 }
