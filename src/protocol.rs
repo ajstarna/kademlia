@@ -90,6 +90,14 @@ struct PendingProbe {
     deadline: Instant,
 }
 
+#[derive(Debug, Clone)]
+enum LookupResult {
+    ValueFound(Value),
+    NodeFound(NodeInfo),
+    Closest(Vec<NodeInfo>),
+}
+
+
 struct Lookup {
     k: usize,
     alpha: usize,
@@ -192,12 +200,39 @@ impl Lookup {
         self.short_list
             .sort_by_key(|n| n.node_id.distance(&self.target));
 
-        println!("{0:?}", self.short_list);
-        println!("\n{0:?}", self.in_flight);
         if self.short_list.len() > self.k {
             self.short_list.truncate(self.k);
         }
     }
+
+
+    /// Returns the final results if applicable, or None, if there are still outstanding
+    /// requests and we haven't found a target node yet.
+    /// Note: this method will not find a target Value, since that would get returned by a
+    /// ValueFound message instead.
+    pub fn possible_final_result(&self) -> Option<LookupResult> {
+	if let LookupKind::Node = self.kind {
+	    // we are looking for a specific node;
+	    // if it has been found by this point, then we are done.
+	    let target_node = self
+		.short_list.iter()
+		.find(|x| x.node_id == self.target);
+	    if let Some(target_node) = target_node {
+		return Some(LookupResult::NodeFound(*target_node));
+	    }
+	}
+
+	if self.in_flight.is_empty() {
+	    // nothing left to wait on, so return whatever we have
+	    return Some(LookupResult::Closest(self.short_list.clone()));
+	}
+
+	// otherwise, if we have more requests in flight, then lets
+	// keep waiting -> no final result to report
+	None
+    }
+
+
 }
 
 struct PendingLookup {
@@ -340,21 +375,37 @@ impl ProtocolManager {
                     }
                 }
 
+		let mut remove_lookup: bool = false;  // remove if there are no more in-flight requests
                 if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
                     pending_lookup.lookup.in_flight.remove(&node_id);
                     pending_lookup.lookup.merge_new_nodes(nodes);
 
+
                     let lookup_effects = pending_lookup.lookup.top_up_alpha_requests();
                     effects.extend(lookup_effects);
 
-                    /*
-                    if pending_lookup.lookup.is_finished() {
-                    let result = pending_lookup.lookup.short_list.clone();
-                    self.pending_lookups.remove(&target);  // cleanup
-                    // TODO: return to the user via the channel when that exists
+		    if pending_lookup.lookup.is_finished() {
+			remove_lookup = true;
+			match pending_lookup.lookup.kind {
+			    LookupKind::Node => {
+				// they were looking for a node; if it is in our remaining shortlist
+			    }
+			    LookupKind::Value => {
+				// if a find value lookup converged on a list of nodes, then we
+				// never actually found the value
+			    }
+
+			}
+
+
+			// TODO: return to the user via the channel when that exists
                      }
-                     */
-                }
+                } else {
+		    // we got a nodes message with no corresponding lookup... curious.
+		}
+		if remove_lookup {
+		    self.pending_lookups.remove(&target);
+		}
                 node_id
             }
 
@@ -394,7 +445,7 @@ impl ProtocolManager {
                 value,
             } => {
                 if let Some(_pending_lookup) = self.pending_lookups.remove(&key) {
-                    // we drop the lookup entirely
+                    // we drop the lookup entirely once we get back the value
                     println!("Lookup for {key:?} completed with value from {node_id:?}");
                 }
 
