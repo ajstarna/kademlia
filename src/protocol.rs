@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
+use tokio::{sync::{mpsc, oneshot}};
 use tokio::time::{interval, Duration, Instant, MissedTickBehavior};
 
 use crate::{
@@ -64,6 +65,20 @@ enum Message {
         key: Key,
         kind: LookupKind,
     },
+}
+
+
+pub enum Command {
+    Get {
+	key: Key,
+	value: Value,
+	response: mpsc::Sender<LookupResult>,
+    },
+    Put{
+	key: Key,
+	value: Value,
+	response: mpsc::Sender<LookupResult>,
+    }
 }
 
 /// Effect represents the "side effect" that `handle_message` wants the outer
@@ -243,6 +258,7 @@ struct PendingLookup {
 pub struct ProtocolManager {
     pub node: Node,
     pub socket: UdpSocket,
+    rx: mpsc::Receiver<Command>,
     pub k: usize,
     pub alpha: usize, // concurrency parameter
     pub pending_probes: HashMap<ProbeID, PendingProbe>,
@@ -250,17 +266,24 @@ pub struct ProtocolManager {
 }
 
 impl ProtocolManager {
-    pub fn new(node: Node, socket: UdpSocket, k: usize, alpha: usize) -> Self {
+    pub fn new(socket: UdpSocket, rx: mpsc::Receiver<Command>, k: usize, alpha: usize) -> anyhow::Result<Self> {
+	let addr = socket.local_addr()?;
+	let ip = addr.ip();
+	let port = addr.port();
+
+	let node = Node::new(k, ip, port);
+
         let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
         let pending_lookups: HashMap<NodeID, PendingLookup> = HashMap::new();
-        Self {
+        Ok(Self {
             node,
             socket,
+	    rx,
             k,
             alpha,
             pending_probes,
             pending_lookups,
-        }
+        })
     }
 
     fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> Option<Effect> {
