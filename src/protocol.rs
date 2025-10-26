@@ -57,28 +57,20 @@ enum Message {
         key: Key,
         value: Value,
     },
-    // Note: this is not a real message in the protocol.
-    // For development purposes, we have this message to test starting and driving a lookup
-    // Once it is working, we are going to have to handle user commands. Possibly from a channel.
-    StartLookup {
-        node_id: NodeID,
-        key: Key,
-        kind: LookupKind,
-    },
+    // Note: start of lookups is driven by Command from the API, not via a Message.
 }
 
 
 pub enum Command {
     Get {
 	key: Key,
-	value: Value,
-	response: mpsc::Sender<LookupResult>,
+	rx: oneshot::Sender<Option<Value>>,
     },
     Put{
 	key: Key,
 	value: Value,
-	response: mpsc::Sender<LookupResult>,
-    }
+	rx: oneshot::Sender<bool>,
+    },
 }
 
 /// Effect represents the "side effect" that `handle_message` wants the outer
@@ -120,6 +112,7 @@ struct Lookup {
     // keep the target as a NodeID, even though sometimes it is a key
     target: NodeID,
     kind: LookupKind,
+    rx: oneshot::Sender<Option<Value>>,  // To send the result back to the user who initiated the lookup
     short_list: Vec<NodeInfo>,
     already_queried: HashSet<NodeID>, // indicate who we have sent a request to already
     in_flight: HashMap<NodeID, Instant>, // active queries with deadlines
@@ -132,6 +125,7 @@ impl Lookup {
         my_node_id: NodeID,
         target: NodeID,
         kind: LookupKind,
+	rx: oneshot::Sender<Option<Value>>,
         initial_candidates: Vec<NodeInfo>,
     ) -> Self {
         let mut short_list = initial_candidates;
@@ -142,6 +136,7 @@ impl Lookup {
             my_node_id,
             target,
             kind,
+	    rx,
             short_list,
             already_queried: HashSet::new(),
             in_flight: HashMap::new(),
@@ -247,18 +242,29 @@ impl Lookup {
 	None
     }
 
+    /// A lookup is considered finished when either:
+    /// - For Node lookups: the exact target node has been found, or
+    /// - There are no in-flight requests remaining (converged shortlist).
+    pub fn is_finished(&self) -> bool {
+        self.possible_final_result().is_some()
+    }
+
 
 }
 
 struct PendingLookup {
     lookup: Lookup,
     deadline: Instant, // TODO: does a lookup itself need a deadline, or are the in flight request timeouts sufficient?
+    // When a Put command initiates a Node lookup to find closest peers,
+    // we stash the value and a completion channel here to send Stores upon completion.
+    put_value: Option<Value>,
+    put_rx: Option<oneshot::Sender<bool>>,
 }
 
 pub struct ProtocolManager {
     pub node: Node,
     pub socket: UdpSocket,
-    rx: mpsc::Receiver<Command>,
+    rx: Option<mpsc::Receiver<Command>>,  // Optional: commands from a library user
     pub k: usize,
     pub alpha: usize, // concurrency parameter
     pub pending_probes: HashMap<ProbeID, PendingProbe>,
@@ -278,11 +284,31 @@ impl ProtocolManager {
         Ok(Self {
             node,
             socket,
-	    rx,
+	    rx: Some(rx),
             k,
             alpha,
             pending_probes,
             pending_lookups,
+        })
+    }
+
+    /// Construct a headless ProtocolManager without a command channel.
+    /// e.g. useful to run a node that is not being used by the user-facing dht library.
+    pub fn new_headless(socket: UdpSocket, k: usize, alpha: usize) -> anyhow::Result<Self> {
+        let addr = socket.local_addr()?;
+        let ip = addr.ip();
+        let port = addr.port();
+
+        let node = Node::new(k, ip, port);
+
+        Ok(Self {
+            node,
+            socket,
+            rx: None,
+            k,
+            alpha,
+            pending_probes: HashMap::new(),
+            pending_lookups: HashMap::new(),
         })
     }
 
@@ -319,6 +345,72 @@ impl ProtocolManager {
                 _other => break None,
             }
         }
+    }
+
+    async fn handle_command(&mut self, command: Command) -> anyhow::Result<Vec<Effect>>{
+        let effects = match command {
+            Command::Get { key, rx } => {
+                // Get corresponds to a Value lookup
+                self.start_lookup(key, LookupKind::Value, rx)
+            }
+            Command::Put { key, value, rx } => {
+                // Put: perform a Node lookup to find k closest nodes, then send Store to them
+                self.start_lookup_with_put(key, value, rx)
+            }
+        };
+        Ok(effects)
+    }
+
+    fn start_lookup(&mut self, key: NodeID, kind: LookupKind, rx: oneshot::Sender<Option<Value>>) -> Vec<Effect>{
+        let initial = self.node.routing_table.k_closest(key);
+        let mut lookup = Lookup::new(
+            self.k,
+            self.alpha,
+            self.node.my_info.node_id,
+            key,
+            kind,
+	    rx,
+            initial,
+        );
+
+        let lookup_effects = lookup.top_up_alpha_requests();
+
+        let deadline = Instant::now() + LOOKUP_TIMEOUT;
+        self.pending_lookups
+            .insert(key, PendingLookup { lookup, deadline, put_value: None, put_rx: None });
+	lookup_effects
+    }
+
+    fn start_lookup_with_put(&mut self, key: NodeID, value: Value, put_rx: oneshot::Sender<bool>) -> Vec<Effect> {
+        // We need a Lookup to drive the search for k closest nodes to the key.
+        // The Lookup requires a oneshot<Option<Value>> even though Put doesn't use it.
+        let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
+
+        let initial = self.node.routing_table.k_closest(key);
+        let mut lookup = Lookup::new(
+            self.k,
+            self.alpha,
+            self.node.my_info.node_id,
+            key,
+            LookupKind::Node,
+            dummy_tx,
+            initial,
+        );
+
+        let lookup_effects = lookup.top_up_alpha_requests();
+
+        let deadline = Instant::now() + LOOKUP_TIMEOUT;
+        self.pending_lookups.insert(
+            key,
+            PendingLookup {
+                lookup,
+                deadline,
+                put_value: Some(value),
+                put_rx: Some(put_rx),
+            },
+        );
+
+        lookup_effects
     }
 
     async fn handle_message(
@@ -408,27 +500,54 @@ impl ProtocolManager {
                     effects.extend(lookup_effects);
 
 		    if pending_lookup.lookup.is_finished() {
+		        // If this lookup was initiated by a Put, we can already enqueue Store effects
+		        // (we'll finalize and fire the Put ack after removing the lookup below).
+		        if let Some(value) = pending_lookup.put_value.as_ref() {
+		            let nodes_to_store = pending_lookup.lookup.short_list.clone();
+		            for n in nodes_to_store.into_iter() {
+		                let store = Message::Store {
+		                    node_id: self.node.my_info.node_id,
+		                    key: target,
+		                    value: value.clone(),
+		                };
+		                let bytes = rmp_serde::to_vec(&store)?;
+		                effects.push(Effect::Send {
+		                    addr: SocketAddr::new(n.ip_address, n.udp_port),
+		                    bytes,
+		                });
+		            }
+		        }
 			remove_lookup = true;
-			match pending_lookup.lookup.kind {
-			    LookupKind::Node => {
-				// they were looking for a node; if it is in our remaining shortlist
-			    }
-			    LookupKind::Value => {
-				// if a find value lookup converged on a list of nodes, then we
-				// never actually found the value
-			    }
-
-			}
-
-
-			// TODO: return to the user via the channel when that exists
                      }
                 } else {
 		    // we got a nodes message with no corresponding lookup... curious.
 		}
-		if remove_lookup {
-		    self.pending_lookups.remove(&target);
-		}
+                if remove_lookup {
+                    if let Some(mut finished) = self.pending_lookups.remove(&target) {
+                        // If this was a Put-initiated Node lookup, dispatch Store messages to shortlist
+                        if let Some(value) = finished.put_value.take() {
+                            let nodes_to_store = finished.lookup.short_list.clone();
+                            for n in nodes_to_store.into_iter() {
+                                let store = Message::Store {
+                                    node_id: self.node.my_info.node_id,
+                                    key: target,
+                                    value: value.clone(),
+                                };
+                                let bytes = rmp_serde::to_vec(&store)?;
+                                effects.push(Effect::Send {
+                                    addr: SocketAddr::new(n.ip_address, n.udp_port),
+                                    bytes,
+                                });
+                            }
+                            if let Some(tx) = finished.put_rx.take() {
+                                let _ = tx.send(true);
+                            }
+                        }
+
+                        // Signal completion to any lookup waiters (None when no value found)
+                        let _ = finished.lookup.rx.send(None);
+                    }
+                }
                 node_id
             }
 
@@ -467,38 +586,16 @@ impl ProtocolManager {
                 key,
                 value,
             } => {
-                if let Some(_pending_lookup) = self.pending_lookups.remove(&key) {
+                if let Some(pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
                     println!("Lookup for {key:?} completed with value from {node_id:?}");
-                }
 
+                    // Send the found value back to the user
+		    let _ = pending_lookup.lookup.rx.send(Some(value.clone()));
+
+                }
                 // Optionally Cache the value in our own local storage
                 self.node.store(key, value);
-
-                // TODO: once we have a user DHT channel most likely, we should set the value back to them here I think.
-
-                node_id
-            }
-
-            // TODO: this is code for developing the lookup functionality
-            // eventually we will receive commands from our user.
-            Message::StartLookup { node_id, key, kind } => {
-                let initial = self.node.routing_table.k_closest(key);
-                let mut lookup = Lookup::new(
-                    self.k,
-                    self.alpha,
-                    self.node.my_info.node_id,
-                    key,
-                    kind,
-                    initial,
-                );
-
-                let lookup_effects = lookup.top_up_alpha_requests();
-                effects.extend(lookup_effects);
-
-                let deadline = Instant::now() + LOOKUP_TIMEOUT;
-                self.pending_lookups
-                    .insert(key, PendingLookup { lookup, deadline });
                 node_id
             }
         };
@@ -582,11 +679,11 @@ impl ProtocolManager {
                         match msg {
                         Ok(msg) => {
                             let effects = self.handle_message(msg, src_addr).await;
-                if let Ok(effects) = effects {
-                    for eff in effects {
-                    self.apply_effect(eff).await;
-                    }
-                }
+			    if let Ok(effects) = effects {
+				for eff in effects {
+				    self.apply_effect(eff).await;
+				}
+			    }
                         }
                         Err(e) => {
                             eprintln!("Error receiving message: {e}");
@@ -601,9 +698,29 @@ impl ProtocolManager {
                     }
                 }
 
-            //
-            // TODO: another arm that reads from a channel from the user of the DHT
-            // it can start lookups
+		// See if the user has given us any commands
+                maybe_command = async {
+                    match self.rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<Command>>().await,  // effectively disable this select arm
+                    }
+                } => {
+                    match maybe_command {
+                        Some(command) => {
+                            let effects = self.handle_command(command).await;
+                            if let Ok(effects) = effects {
+                                for eff in effects {
+                                    self.apply_effect(eff).await;
+                                }
+                            }
+                        }
+                        None => {
+                            // Command channel closed; disable commands and continue headless.
+                            self.rx = None;
+                        }
+                    }
+                }
+
 
                 _ = ticker.tick() => {
                     let now = Instant::now();
@@ -627,9 +744,8 @@ mod test {
 
     #[tokio::test]
     async fn test_receive_ping() {
-        let node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
         let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-        let mut pm = ProtocolManager::new(node, dummy_socket, 20, 3);
+        let mut pm = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         let src_id = NodeID::new();
         let probe_id = ProbeID::new_random();
@@ -662,9 +778,8 @@ mod test {
 
     #[tokio::test]
     async fn test_receive_store_and_find_value() {
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8081);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         let src_id: NodeID = NodeID::new();
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -724,9 +839,8 @@ mod test {
 
     #[tokio::test]
     async fn test_receive_find_value_found() {
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8082);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         // Insert a value into this node's storage directly
         let key: Key = NodeID::from_hashed(&"world");
@@ -761,9 +875,8 @@ mod test {
 
     #[tokio::test]
     async fn test_receive_find_value_nodes() {
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8083);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         let key: Key = NodeID::from_hashed(&"missing");
 
@@ -798,10 +911,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_start_lookup_sends_alpha_queries() {
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8090);
+    async fn test_get_starts_sends_alpha_queries() {
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         // Prepare peers with known distances to the target
         let target: NodeID = id_with_first_byte(0x00);
@@ -822,17 +934,10 @@ mod test {
         insert(p3);
         insert(p4);
 
-        // Start the lookup
+        // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
-        let src_id: NodeID = NodeID::new();
-        let msg = Message::StartLookup {
-            node_id: src_id,
-            key,
-            kind: LookupKind::Value,
-        };
-        let src: SocketAddr = "127.0.0.1:4002".parse().unwrap();
-
-        let effects = pm.handle_message(msg, src).await.unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let effects = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
 
         // Collect sends and decode; should be alpha sends to the three closest peers
         let mut dests = Vec::new();
@@ -860,9 +965,8 @@ mod test {
 
     #[tokio::test]
     async fn test_nodes_reply_tops_up_lookup() {
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8091);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 3);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 6001, 0x00);
@@ -879,16 +983,10 @@ mod test {
         insert(p2);
         insert(p3);
 
-        // Start the lookup
+        // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
-        let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup {
-            node_id: src_id,
-            key,
-            kind: LookupKind::Value,
-        };
-        let src: SocketAddr = "127.0.0.1:4100".parse().unwrap();
-        let _ = pm.handle_message(start, src).await.unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let _ = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
 
         // Nodes reply from p1 introducing a new peer p4
         let p4 = make_peer(4, 6004, 0x03);
@@ -919,9 +1017,8 @@ mod test {
     #[tokio::test(start_paused = true)]
     async fn test_lookup_timeout_tops_up() {
         // Alpha=2, 3 peers → expect 2 initial requests, then after timeout a top-up to the 3rd peer
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8092);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 2).unwrap();
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 6101, 0x00); // closest
@@ -939,16 +1036,10 @@ mod test {
         insert(p2);
         insert(p3);
 
-        // Start lookup: should send 2 initial FindValue requests (alpha=2)
+        // Start lookup via Command::Get: should send 2 initial FindValue requests (alpha=2)
         let key: Key = NodeID(target.0);
-        let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup {
-            node_id: src_id,
-            key,
-            kind: LookupKind::Value,
-        };
-        let src: SocketAddr = "127.0.0.1:4200".parse().unwrap();
-        let effects = pm.handle_message(start, src).await.unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let effects = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
 
         let mut initial_dests = Vec::new();
         for eff in effects.into_iter() {
@@ -987,9 +1078,8 @@ mod test {
     #[tokio::test]
     async fn test_nodes_reply_triggers_top_ups_to_new_candidate() {
         // Arrange: alpha=2, two initial peers near the target
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8094);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 2).unwrap();
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 7001, 0x00); // closest
@@ -1006,16 +1096,10 @@ mod test {
         insert(p1);
         insert(p2);
 
-        // Start the lookup for this target
+        // Start the lookup for this target via Command::Get
         let key: Key = NodeID(target.0);
-        let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup {
-            node_id: src_id,
-            key,
-            kind: LookupKind::Value,
-        };
-        let src: SocketAddr = "127.0.0.1:4300".parse().unwrap();
-        let _ = pm.handle_message(start, src).await.unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let _ = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
 
         // Act: simulate a Nodes reply from p1 that introduces p_new
         let nodes_msg = Message::Nodes {
@@ -1049,10 +1133,9 @@ mod test {
     #[tokio::test]
     async fn test_value_lookup_multiple_hops_via_nodes() {
         // Make a lookup that requires multiple jumps: p1 -> p2 -> p3, where p3 returns the value
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8096);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         // alpha=1 to force sequential hops
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 1);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 1).unwrap();
 
         let target: NodeID = id_with_first_byte(0x00);
         let key: Key = NodeID(target.0);
@@ -1071,15 +1154,9 @@ mod test {
         };
         insert(p1);
 
-        // Start the lookup (Value)
-        let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup {
-            node_id: src_id,
-            key,
-            kind: LookupKind::Value,
-        };
-        let src: SocketAddr = "127.0.0.1:4400".parse().unwrap();
-        let effects = pm.handle_message(start, src).await.unwrap();
+        // Start the lookup (Value) via Command::Get
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let effects = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
 
         // Expect a FindValue sent to p1
         let mut sent_to_p1 = false;
@@ -1162,9 +1239,8 @@ mod test {
     #[tokio::test]
     async fn test_lookup_ends_when_shortlist_unchanged() {
         // Arrange: alpha=2, two initial peers that are the closest to target
-        let node: Node = Node::new(20, "127.0.0.1".parse().unwrap(), 8097);
         let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pm: ProtocolManager = ProtocolManager::new(node, dummy_socket, 20, 2);
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 2).unwrap();
 
         let target: NodeID = id_with_first_byte(0x00);
         let p1 = make_peer(1, 9001, 0x00); // closest
@@ -1180,15 +1256,9 @@ mod test {
         insert(p1);
         insert(p2);
 
-        // Start a Node lookup towards `target`
-        let src_id: NodeID = NodeID::new();
-        let start = Message::StartLookup {
-            node_id: src_id,
-            key: target, // for Node lookup, the "key" is the NodeID target
-            kind: LookupKind::Node,
-        };
-        let src: SocketAddr = "127.0.0.1:4500".parse().unwrap();
-        let effects = pm.handle_message(start, src).await.unwrap();
+        // Start a Node lookup towards `target` via Command::Put (performs node lookup under the hood)
+        let (put_tx, _put_rx) = tokio::sync::oneshot::channel::<bool>();
+        let effects = pm.handle_command(Command::Put { key: target, value: b"x".to_vec(), rx: put_tx }).await.unwrap();
 
         // Expect exactly alpha initial FindNode queries
         let initial_sends: Vec<SocketAddr> = effects
@@ -1277,5 +1347,109 @@ mod test {
             pm.pending_lookups.get(&target).is_none(),
             "lookup should be removed once all queries have returned and shortlist is unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_sends_store_to_final_shortlist() {
+        // Arrange: alpha=2, two peers near the key. Put should Node-lookup, then STORE to both.
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 2).unwrap();
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let p1 = make_peer(1, 9101, 0x00); // closest
+        let p2 = make_peer(2, 9102, 0x01); // next closest
+
+        let mut insert = |peer: NodeInfo| loop {
+            match pm.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+        insert(p1);
+        insert(p2);
+
+        // Act: issue a Put command
+        let key: Key = target;
+        let value: Value = b"hello-put".to_vec();
+        let (put_tx, put_rx) = tokio::sync::oneshot::channel::<bool>();
+        let effects = pm
+            .handle_command(Command::Put {
+                key,
+                value: value.clone(),
+                rx: put_tx,
+            })
+            .await
+            .unwrap();
+
+        // Expect initial FindNode requests to p1 and p2
+        let mut findnode_dests = Vec::new();
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if matches!(msg, Message::FindNode { .. }) {
+                        findnode_dests.push(addr);
+                    }
+                }
+            }
+        }
+        let expected: std::collections::HashSet<_> = vec![
+            std::net::SocketAddr::new(p1.ip_address, p1.udp_port),
+            std::net::SocketAddr::new(p2.ip_address, p2.udp_port),
+        ]
+        .into_iter()
+        .collect();
+        let got: std::collections::HashSet<_> = findnode_dests.into_iter().collect();
+        assert_eq!(got, expected, "initial FindNode should target both peers");
+
+        // Simulate Nodes replies from both peers that do not improve the shortlist
+        let nodes_from_p1 = Message::Nodes {
+            node_id: p1.node_id,
+            target,
+            nodes: vec![p1, p2],
+        };
+        let effects1 = pm
+            .handle_message(nodes_from_p1, std::net::SocketAddr::new(p1.ip_address, p1.udp_port))
+            .await
+            .unwrap();
+
+        // Second reply should finish the lookup and emit STORE messages
+        let nodes_from_p2 = Message::Nodes {
+            node_id: p2.node_id,
+            target,
+            nodes: vec![p1, p2],
+        };
+        let effects2 = pm
+            .handle_message(nodes_from_p2, std::net::SocketAddr::new(p2.ip_address, p2.udp_port))
+            .await
+            .unwrap();
+
+        // Collect Store sends
+        let mut store_dests = Vec::new();
+        let mut store_payloads = Vec::new();
+        for eff in effects1.into_iter().chain(effects2.into_iter()) {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if let Message::Store { key: k, value: v, .. } = msg {
+                        assert_eq!(k, key);
+                        assert_eq!(v, value);
+                        store_dests.push(addr);
+                        store_payloads.push((k, v));
+                    }
+                }
+            }
+        }
+        let expected_store: std::collections::HashSet<_> = vec![
+            std::net::SocketAddr::new(p1.ip_address, p1.udp_port),
+            std::net::SocketAddr::new(p2.ip_address, p2.udp_port),
+        ]
+        .into_iter()
+        .collect();
+        let got_store: std::collections::HashSet<_> = store_dests.into_iter().collect();
+        assert!(pm.pending_lookups.get(&target).is_none(), "lookup should be removed on completion");
+        assert_eq!(got_store, expected_store, "should STORE to both final peers");
+
+        // And the Put ack should be true
+        let ok = put_rx.await.expect("put oneshot should complete");
+        assert!(ok);
     }
 }
