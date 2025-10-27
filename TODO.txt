@@ -7,4 +7,4 @@
 
 - how to test at scale and in a real network setting?
    - even some manual testing with the binary?
-   - if we mock udp we could test large scale locally, if thats useful
+   - if we mock udp we could test large scale locally. simulate a network with flakiness
