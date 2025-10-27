@@ -38,4 +38,9 @@ pub enum Command {
     /// addresses. Responses are handled by the event loop to populate the
     /// routing table and drive a self-lookup toward convergence.
     Bootstrap { addrs: Vec<SocketAddr> },
+
+    /// Test/debug helper: query whether this node currently has a value for `key`.
+    /// Replies `true` if present in local storage.
+    DebugHasValue { key: Key, rx: oneshot::Sender<bool> },
+
 }

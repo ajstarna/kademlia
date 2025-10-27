@@ -117,6 +117,41 @@ impl ProtocolManager {
         })
     }
 
+    /// Add a known peer directly into the routing table.
+    /// This is primarily useful for tests or when seeding nodes programmatically
+    /// without relying on receiving a message first.
+    /// If the appropriate bucket is full, this will initiate a probe to the LRU
+    /// entry per Kademlia rules.
+    pub async fn add_known_peer(&mut self, peer: NodeInfo) {
+        loop {
+            match self.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => {
+                    // Keep looping until a split does not happen.
+                    continue;
+                }
+                InsertResult::Full { lru } => {
+                    // Probe the LRU node to determine if it should be evicted.
+                    let probe_id = ProbeID::new_random();
+                    let ping = Message::Ping {
+                        node_id: self.node.my_info.node_id,
+                        probe_id,
+                    };
+                    if let Ok(bytes) = rmp_serde::to_vec(&ping) {
+                        let addr = SocketAddr::new(lru.ip_address, lru.udp_port);
+                        // Best-effort send; errors are logged by apply_effect code paths elsewhere,
+                        // but here we send directly for simplicity.
+                        let _ = self.socket.send_to(&bytes, addr).await;
+                        let deadline = Instant::now() + PROBE_TIMEOUT;
+                        self.pending_probes
+                            .insert(probe_id, PendingProbe { peer: lru, deadline });
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+
     /// Construct a headless ProtocolManager without a command channel.
     /// e.g. useful to run a node that is not being used by the user-facing dht library.
     pub fn new_headless(socket: UdpSocket, k: usize, alpha: usize) -> anyhow::Result<Self> {
@@ -202,6 +237,11 @@ impl ProtocolManager {
                     effs.push(Effect::Send { addr, bytes: bytes.clone() });
                 }
                 effs
+            }
+            Command::DebugHasValue { key, rx } => {
+                let has = self.node.get(&key).is_some();
+                let _ = rx.send(has);
+                Vec::new()
             }
         };
         Ok(effects)
@@ -352,23 +392,31 @@ impl ProtocolManager {
 		    if pending_lookup.lookup.is_finished() {
 		        // If this lookup was initiated by a Put, we can already enqueue Store effects
 		        // (we'll finalize and fire the Put ack after removing the lookup below).
-		        if let Some(value) = pending_lookup.put_value.as_ref() {
-		            let nodes_to_store = pending_lookup.lookup.short_list.clone();
-		            for n in nodes_to_store.into_iter() {
-		                let store = Message::Store {
-		                    node_id: self.node.my_info.node_id,
-		                    key: target,
-		                    value: value.clone(),
-		                };
-		                let bytes = rmp_serde::to_vec(&store)?;
-		                effects.push(Effect::Send {
-		                    addr: SocketAddr::new(n.ip_address, n.udp_port),
-		                    bytes,
-		                });
-		            }
-		        }
-			remove_lookup = true;
-                     }
+                    if let Some(value) = pending_lookup.put_value.as_ref() {
+                        let nodes_to_store = pending_lookup.lookup.short_list.clone();
+                        for n in nodes_to_store.iter().cloned() {
+                            let store = Message::Store {
+                                node_id: self.node.my_info.node_id,
+                                key: target,
+                                value: value.clone(),
+                            };
+                            let bytes = rmp_serde::to_vec(&store)?;
+                            effects.push(Effect::Send {
+                                addr: SocketAddr::new(n.ip_address, n.udp_port),
+                                bytes,
+                            });
+                        }
+                        let my_dist = self.node.my_info.node_id.distance(&target);
+                        let max_peer_dist = nodes_to_store
+                            .iter()
+                            .map(|n| n.node_id.distance(&target))
+                            .max();
+                        if max_peer_dist.map_or(true, |d| my_dist <= d) {
+                            self.node.store(target, value.clone());
+                        }
+                    }
+                    remove_lookup = true;
+                }
                 } else {
 		    // we got a nodes message with no corresponding lookup... curious.
 		}
@@ -377,7 +425,7 @@ impl ProtocolManager {
                         // If this was a Put-initiated Node lookup, dispatch Store messages to shortlist
                         if let Some(value) = finished.put_value.take() {
                             let nodes_to_store = finished.lookup.short_list.clone();
-                            for n in nodes_to_store.into_iter() {
+                            for n in nodes_to_store.iter().cloned() {
                                 let store = Message::Store {
                                     node_id: self.node.my_info.node_id,
                                     key: target,
@@ -388,6 +436,14 @@ impl ProtocolManager {
                                     addr: SocketAddr::new(n.ip_address, n.udp_port),
                                     bytes,
                                 });
+                            }
+                            let my_dist = self.node.my_info.node_id.distance(&target);
+                            let max_peer_dist = nodes_to_store
+                                .iter()
+                                .map(|n| n.node_id.distance(&target))
+                                .max();
+                            if max_peer_dist.map_or(true, |d| my_dist <= d) {
+                                self.node.store(target, value.clone());
                             }
                             if let Some(tx) = finished.put_rx.take() {
                                 let _ = tx.send(true);

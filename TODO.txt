@@ -1,10 +1,10 @@
-- flesh out the DHT type and add some tests.
+- add a binary (main.rs?) with a simple clap CLI to run a headless node.
+    - It should be able to be one of the bootstrap nodes, or it can join an existing network.
 
-- test framework for running multiple nodes.
-    - Could this include some unit tests with two protocol managers? Mock sockets right?
-        - actually maybe just two DHTs as implemented in the above TODO
-    - then some larger integration tests that actually spin up separate nodes and run through some cases.
-    - we could run a bunch of "headless"
-
+- add logging to help see whats happening.
 
 - the DHT class should use actual errors types since user facing
+
+- how to test at scale and in a real network setting?
+   - even some manual testing with the binary?
+   - if we mock udp we could test large scale locally, if thats useful
