@@ -61,15 +61,33 @@ enum Message {
 }
 
 
+/// Commands are the user-facing API into the ProtocolManager event loop.
+///
+/// A higher-level library (i.e., `KademliaDHT`) holds an `mpsc::Sender<Command>`
+/// and sends requests into the single-threaded protocol task. This ensures that
+/// all socket I/O, routing-table mutations, and lookup state are owned
+/// by the main event loop, run().
 pub enum Command {
+    /// Start a value lookup for `key`. The oneshot is completed with
+    /// `Some(value)` if any node returns the value, or `None` if the lookup
+    /// converges without a value.
     Get {
 	key: Key,
 	rx: oneshot::Sender<Option<Value>>,
     },
+    /// Store `value` under `key`. Internally performs a node lookup to find
+    /// the k closest peers and enqueues `Store` messages to them. The oneshot
+    /// indicates whether the operation was dispatched (`true`).
     Put{
 	key: Key,
 	value: Value,
 	rx: oneshot::Sender<bool>,
+    },
+    /// Initiate bootstrap by sending `FindNode(self)` to the given seed
+    /// addresses. Responses are handled by the event loop to populate the
+    /// routing table and drive a self-lookup toward convergence.
+    Bootstrap {
+        addrs: Vec<SocketAddr>,
     },
 }
 
@@ -357,43 +375,47 @@ impl ProtocolManager {
                 // Put: perform a Node lookup to find k closest nodes, then send Store to them
                 self.start_lookup_with_put(key, value, rx)
             }
+            Command::Bootstrap { addrs } => {
+                let my_id = self.node.my_info.node_id;
+                // Initialize a pending self-lookup with empty initial candidates
+                let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
+                let mut effs = self.init_lookup(
+                    my_id,
+                    LookupKind::Node,
+                    dummy_tx,
+                    Vec::new(),
+                    None,
+                    None,
+                );
+
+                // Send initial FindNode(self) to the seed addresses
+                let query = Message::FindNode { node_id: my_id, target: my_id };
+                let bytes = rmp_serde::to_vec(&query)?;
+                for addr in addrs {
+                    effs.push(Effect::Send { addr, bytes: bytes.clone() });
+                }
+                effs
+            }
         };
         Ok(effects)
     }
 
-    fn start_lookup(&mut self, key: NodeID, kind: LookupKind, rx: oneshot::Sender<Option<Value>>) -> Vec<Effect>{
-        let initial = self.node.routing_table.k_closest(key);
+    fn init_lookup(
+        &mut self,
+        key: NodeID,
+        kind: LookupKind,
+        rx: oneshot::Sender<Option<Value>>,
+        initial: Vec<NodeInfo>,
+        put_value: Option<Value>,
+        put_rx: Option<oneshot::Sender<bool>>,
+    ) -> Vec<Effect> {
         let mut lookup = Lookup::new(
             self.k,
             self.alpha,
             self.node.my_info.node_id,
             key,
             kind,
-	    rx,
-            initial,
-        );
-
-        let lookup_effects = lookup.top_up_alpha_requests();
-
-        let deadline = Instant::now() + LOOKUP_TIMEOUT;
-        self.pending_lookups
-            .insert(key, PendingLookup { lookup, deadline, put_value: None, put_rx: None });
-	lookup_effects
-    }
-
-    fn start_lookup_with_put(&mut self, key: NodeID, value: Value, put_rx: oneshot::Sender<bool>) -> Vec<Effect> {
-        // We need a Lookup to drive the search for k closest nodes to the key.
-        // The Lookup requires a oneshot<Option<Value>> even though Put doesn't use it.
-        let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
-
-        let initial = self.node.routing_table.k_closest(key);
-        let mut lookup = Lookup::new(
-            self.k,
-            self.alpha,
-            self.node.my_info.node_id,
-            key,
-            LookupKind::Node,
-            dummy_tx,
+            rx,
             initial,
         );
 
@@ -405,12 +427,33 @@ impl ProtocolManager {
             PendingLookup {
                 lookup,
                 deadline,
-                put_value: Some(value),
-                put_rx: Some(put_rx),
+                put_value,
+                put_rx,
             },
         );
 
         lookup_effects
+    }
+
+    fn start_lookup(&mut self, key: NodeID, kind: LookupKind, rx: oneshot::Sender<Option<Value>>) -> Vec<Effect> {
+        let initial = self.node.routing_table.k_closest(key);
+        self.init_lookup(key, kind, rx, initial, None, None)
+    }
+
+    fn start_lookup_with_put(&mut self, key: NodeID, value: Value, put_rx: oneshot::Sender<bool>) -> Vec<Effect> {
+        // We need a Lookup to drive the search for k closest nodes to the key.
+        // The Lookup requires a oneshot<Option<Value>> even though Put doesn't use it.
+        let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
+
+        let initial = self.node.routing_table.k_closest(key);
+        self.init_lookup(
+            key,
+            LookupKind::Node,
+            dummy_tx,
+            initial,
+            Some(value),
+            Some(put_rx),
+        )
     }
 
     async fn handle_message(

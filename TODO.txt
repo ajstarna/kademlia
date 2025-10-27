@@ -1,15 +1,14 @@
-- ability for an application to talk to the protocol manager via some API. Basically with a store and get method
-    - i think make the DHT a library, and the user would spawn run in a tokio async task then talk to it via a channel.
-    - maybe a new KademliaDHT struct that inside its new() it spawns a tokio task to run the protocol manager? And returns
-    the channel handle for the user? So the user can interact with the DHT without worrying about the PM running on a task?
-    Is this how things are handles? Alternatively the user of the lib would need to run their own task and stuff.
-    - have a binary crate along with the library
-
 - bootstrap nodes
 
 - joining the network (there is a described process of requesting yourself or something like that)
+
+- flesh out the DHT type and add some tests.
 
 - test framework for running multiple nodes.
     - Could this include some unit tests with two protocol managers? Mock sockets right?
         - actually maybe just two DHTs as implemented in the above TODO
     - then some larger integration tests that actually spin up separate nodes and run through some cases.
+    - we could run a bunch of "headless"
+
+
+- the DHT class should use actual errors types since user facing
