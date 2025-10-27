@@ -1,6 +1,6 @@
 #[cfg(test)]
 pub mod test_support {
-    use crate::node::identifier::{NodeID, NodeInfo};
+    use crate::core::identifier::{NodeID, NodeInfo};
     use ethereum_types::H160;
     use std::net::{IpAddr, Ipv4Addr};
 

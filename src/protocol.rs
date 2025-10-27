@@ -589,7 +589,7 @@ impl ProtocolManager {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::node::routing_table::InsertResult;
+    use crate::core::routing_table::InsertResult;
     use crate::test_support::test_support::{id_with_first_byte, make_peer};
 
     #[tokio::test]
