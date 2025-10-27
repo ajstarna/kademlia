@@ -1,7 +1,3 @@
-- bootstrap nodes
-
-- joining the network (there is a described process of requesting yourself or something like that)
-
 - flesh out the DHT type and add some tests.
 
 - test framework for running multiple nodes.
