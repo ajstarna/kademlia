@@ -1,11 +1,5 @@
 use tokio::net::UdpSocket;
-
-mod node;
-mod protocol;
-#[cfg(test)]
-mod test_support;
-
-use protocol::ProtocolManager;
+use kademlia::protocol::ProtocolManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

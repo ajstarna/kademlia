@@ -4,8 +4,6 @@ use super::identifier::Key;
 
 pub type Value = Vec<u8>;
 
-/// For now, Storage is a simple wrapper around a HashMap
-/// We abstract it for future enhancements like TTL, optional DB, etc.
 #[derive(Debug)]
 pub struct Storage {
     map: HashMap<Key, Value>,
@@ -13,9 +11,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn new() -> Self {
-        Storage {
-            map: HashMap::new(),
-        }
+        Storage { map: HashMap::new() }
     }
 
     pub fn insert(&mut self, key: Key, value: Value) {
@@ -34,3 +30,4 @@ impl Storage {
         self.map.contains_key(key)
     }
 }
+

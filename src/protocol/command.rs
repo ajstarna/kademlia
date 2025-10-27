@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use tokio::sync::oneshot;
 
-use crate::node::identifier::Key;
-use crate::node::storage::Value;
+use crate::core::identifier::Key;
+use crate::core::storage::Value;
 
 /// Commands are the user-facing API into the ProtocolManager event loop.
 ///
@@ -39,4 +39,3 @@ pub enum Command {
     /// routing table and drive a self-lookup toward convergence.
     Bootstrap { addrs: Vec<SocketAddr> },
 }
-

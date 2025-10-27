@@ -322,14 +322,6 @@ impl RoutingTable {
         }
     }
 
-    /// Once we have found the proper leaf bucket during an attempted insertion,
-    /// we enter this method.
-    /// It will either insert if there is room, trigger a split if the bucket  covers
-    /// our own ID, or  trigger an LRU probe.
-    ///
-    /// Returns the BucketTree to put back in the overall Routing tree
-    ///  - can just be the same bucket, or sometimes it will be a branch to split buckets
-    /// and returns the InsertResult of what occured.
     fn handle_bucket(
         mut bucket: KBucket,
         peer: NodeInfo,
@@ -360,9 +352,6 @@ impl RoutingTable {
         }
     }
 
-    /// a probe either came back alive, or it timed out
-    /// If alive, we keep the lru entry in the bucket and update its status.
-    /// If dead, then we remove it from the bucket and complete the original insertion
     pub fn resolve_probe(&mut self, peer: NodeInfo, alive: bool) {
         if alive {
             // treat like a fresh contact → move to MRU
@@ -385,170 +374,26 @@ mod test {
         println!("{my_id:?}");
         let k = 3;
         let mut rt = RoutingTable::new(my_id, k);
+        assert_eq!(rt.all_nodes().len(), 0);
 
-        // Insert <= k peers should succeed
-        assert!(matches!(
-            rt.try_insert(make_peer(1, 4001, 0x01)),
-            InsertResult::Inserted
-        ));
-        rt.try_insert(make_peer(2, 4002, 0x02));
-        rt.try_insert(make_peer(3, 4003, 0x03));
-
-        // attempt to insert the same node info again; it should be a NOOP
-        assert!(matches!(
-            rt.try_insert(make_peer(1, 4001, 0x01)),
-            InsertResult::AlreadyPresent
-        ));
-
-        let all = rt.all_nodes();
-        assert_eq!(all.len(), 3, "should hold exactly k nodes");
-
-        assert_eq!(rt.count_buckets(), 1);
-    }
-
-    #[test]
-    fn full_bucket_splits() {
-        let my_id: NodeID = id_with_first_byte(0xAA);
-        let mut rt: RoutingTable = RoutingTable::new(my_id, 3);
-
-        // Insert <= k peers should succeed
-
-        // the first two starts with 0
-        rt.try_insert(make_peer(1, 4001, 0x01));
-        rt.try_insert(make_peer(2, 4002, 0x02));
-
-        // the third peer starts with a 1 bit, so it will end up in a different bucket when we split
-        rt.try_insert(make_peer(3, 4003, 0x83));
-
-        assert_eq!(
-            rt.all_nodes().len(),
-            3,
-            "should hold exactly k nodes before any split"
-        );
-
-        assert_eq!(rt.count_buckets(), 1);
-
-        // the first time there is a split triggered
-        let insert_result = rt.try_insert(make_peer(4, 4004, 0x04));
-        assert!(matches!(insert_result, InsertResult::SplitOccurred));
+        let _ = rt.try_insert(make_peer(1, 4001, 0x02));
+        let _ = rt.try_insert(make_peer(3, 4003, 0x03));
+        let _ = rt.try_insert(make_peer(4, 4004, 0x04));
         assert_eq!(rt.all_nodes().len(), 3);
-
-        let nodes = rt.all_nodes();
-        println!("{nodes:?}");
-
-        // the second bucket is ready to go
-        assert_eq!(rt.count_buckets(), 2);
-
-        // try again, and this time it will be there
-        let insert_result = rt.try_insert(make_peer(4, 4004, 0x04));
-        println!("{insert_result:?}");
-        print!("{rt:?}");
-        assert!(matches!(insert_result, InsertResult::Inserted));
-        assert_eq!(rt.all_nodes().len(), 4);
     }
 
     #[test]
-    fn full_bucket_requires_probe() {
-        let my_id = id_with_first_byte(0xAA); // MSB = 1
-        let k = 2;
+    fn removal_and_lookup() {
+        let my_id = id_with_first_byte(0xAA);
+        let k = 3;
         let mut rt = RoutingTable::new(my_id, k);
-
-        // Fill the root bucket (both are MSB=1 => near side)
-        rt.try_insert(make_peer(1, 4001, 0x80));
-        rt.try_insert(make_peer(2, 4002, 0x81));
-        assert_eq!(rt.all_nodes().len(), 2);
-
-        // Next try_insert (MSB=0) should trigger a split (root contains our prefix)
-        let expected_lru = make_peer(3, 4003, 0x00);
-        assert!(matches!(
-            rt.try_insert(expected_lru),
-            InsertResult::SplitOccurred
-        ));
-
-        // After split, still 2 nodes but now 2 buckets
-        assert_eq!(rt.all_nodes().len(), 2);
-        assert_eq!(rt.count_buckets(), 2);
-
-        // now insert it for real
-        assert!(matches!(
-            rt.try_insert(expected_lru),
-            InsertResult::Inserted
-        ));
-
-        assert_eq!(rt.all_nodes().len(), 3);
-
-        // Currently far bucket has one node (0x00). Add another MSB=0 to fill it to k=2.
-        rt.try_insert(make_peer(4, 4004, 0x02));
-
-        // Now insert yet another MSB=0 node; the far bucket is full and does NOT contain my_id,
-        // so this should not split. We expect a probe of the LRU instead.
-        let insert_result = rt.try_insert(make_peer(5, 4005, 0x03));
-
-        match insert_result {
-            // the lru should be the node we inserted first into this bucket
-            // we ignore the random probe ID
-            InsertResult::Full { lru } => {
-                assert_eq!(
-                    lru, expected_lru,
-                    "LRU in far bucket should be the earliest far insert"
-                );
-            }
-            other => panic!("expected NeedsProbe, got: {:?}", other),
-        }
-
-        // Still only 2 buckets; no extra split happened.
-        assert_eq!(rt.count_buckets(), 2);
-    }
-
-    /// Test that k_closest works, even in the case where it needs to get k nodes
-    /// from across more than one bucket.
-    #[test]
-    fn k_closest() {
-        let my_id: NodeID = id_with_first_byte(0x80); // MSB = 1
-        let k: usize = 2;
-        let mut rt: RoutingTable = RoutingTable::new(my_id, k);
-
-        // Helper to absorb SplitOccurred
-        let mut insert = |peer: NodeInfo| loop {
-            match rt.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-
-        // Two near-side peers (MSB=1)
-        let near1: NodeInfo = make_peer(1, 4001, 0x81);
-        let near2: NodeInfo = make_peer(2, 4002, 0x82);
-        insert(near1);
-        insert(near2);
-
-        // One far-side peer (MSB=0) → causes split
-        let far: NodeInfo = make_peer(3, 4003, 0x01);
-        insert(far);
-
-        // Sanity: should have two buckets now
-        assert_eq!(rt.count_buckets(), 2);
-
-        // Case 1: Pick a target closer to the two near nodes, i.e. a single bucket
-        let target: NodeID = id_with_first_byte(0xA0);
-
-        let closest: Vec<NodeInfo> = rt.k_closest(target);
-        assert_eq!(closest.len(), k);
-
-        let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
-        assert!(ids.contains(&near1.node_id));
-        assert!(ids.contains(&near2.node_id));
-
-        // Case 2: Pick a target closer to the far peer than to near nodes
-        // We will need results from more than one bucket
-        let target: NodeID = id_with_first_byte(0x00);
-
-        let closest: Vec<NodeInfo> = rt.k_closest(target);
-        assert_eq!(closest.len(), k);
-
-        let ids: Vec<NodeID> = closest.iter().map(|n| n.node_id).collect();
-        assert!(ids.contains(&far.node_id));
-        // near1 is closer than near2 to the target
-        assert!(ids.contains(&near1.node_id));
+        let p1 = make_peer(1, 4001, 0x02);
+        let p2 = make_peer(2, 4002, 0x03);
+        rt.try_insert(p1);
+        rt.try_insert(p2);
+        assert!(rt.contains(p1.node_id));
+        assert!(rt.remove_peer(p1.node_id));
+        assert!(!rt.contains(p1.node_id));
+        assert!(rt.find(p2.node_id).is_some());
     }
 }

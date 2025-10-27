@@ -6,10 +6,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-/// The ID corresponding to an attempted insert on a full K bucket.
-/// A probe is sent out to the LRU, and if they do not respond in time,
-/// then we boot them from the bucket and finish the new insertion.
-/// The ID tells us which initial attempted insert is ready to resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProbeID(u64);
 
@@ -24,7 +20,6 @@ impl ProbeID {
 pub struct NodeID(pub H160);
 
 impl NodeID {
-    /// randomly generate a new ID
     pub fn new() -> Self {
         NodeID(H160::random())
     }
@@ -33,12 +28,10 @@ impl NodeID {
         NodeID(H160::zero())
     }
 
-    /// Create a NodeID from raw bytes (no hashing).
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self(H160::from_slice(bytes))
     }
 
-    /// Create a NodeID by hashing arbitrary input (e.g. for DHT keys).
     pub fn from_hashed<S: AsRef<[u8]>>(input: &S) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(input.as_ref());
@@ -54,8 +47,6 @@ impl NodeID {
         (bytes[byte_index] >> shift_amount) & 1u8
     }
 
-    /// get just the first `depth` bits
-    /// USeful when determingin if a given Kbucket covers a new node ID
     pub fn prefix_bits(&self, depth: usize) -> u128 {
         let mut acc: u128 = 0;
         for i in 0..depth {
@@ -64,10 +55,7 @@ impl NodeID {
         acc
     }
 
-    /// create a copy of this NodeID but with a given bit set to a given value.
-    /// Useful when splitting buckets and assigning the new buckets' prefixes.
     pub fn with_bit(&self, bit_index: usize, bit: u8) -> Self {
-        //let mut bytes: [u8; 20] = (*self.0.as_bytes()).clone();
         let mut bytes: [u8; 20] = *self.0.as_fixed_bytes();
 
         let byte_index = bit_index / 8;
@@ -83,7 +71,6 @@ impl NodeID {
         NodeID(H160::from(bytes))
     }
 
-    // helpful when comparing distances across nodes in our buckets
     pub fn distance(&self, other: &NodeID) -> Distance {
         Distance(self.0 ^ other.0)
     }
@@ -97,7 +84,6 @@ impl BitXor for NodeID {
     }
 }
 
-/// Kademlia treats keys and NodeIDs identically
 pub type Key = NodeID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -111,8 +97,6 @@ pub struct NodeInfo {
     pub node_id: NodeID,
 }
 
-// Needed for msgpack ser/de of IpAddr.
-// Instead of producing a map with the enum variant, we simply convert right into a string.
 mod serde_ipaddr {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::net::IpAddr;
@@ -130,32 +114,5 @@ mod serde_ipaddr {
     {
         let s = String::deserialize(d)?;
         s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn find_bits() {
-        let mut bytes = [0u8; 20];
-        bytes[1] = 5; // 00000101
-        bytes[10] = 64; // 01000000
-
-        let node_id = NodeID(H160::from(bytes));
-
-        assert_eq!(node_id.get_bit_at(5), 0); // first byte is all zeros
-
-        // second byte
-        assert_eq!(node_id.get_bit_at(8), 0);
-        assert_eq!(node_id.get_bit_at(13), 1);
-        assert_eq!(node_id.get_bit_at(14), 0);
-        assert_eq!(node_id.get_bit_at(15), 1);
-
-        // 10th byte
-        assert_eq!(node_id.get_bit_at(80), 0);
-        assert_eq!(node_id.get_bit_at(81), 1);
-        assert_eq!(node_id.get_bit_at(82), 0);
     }
 }

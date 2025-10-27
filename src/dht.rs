@@ -1,6 +1,6 @@
 use crate::{
-    node::identifier::Key,
-    node::storage::Value,
+    core::identifier::Key,
+    core::storage::Value,
 };
 
 use crate::protocol::{ProtocolManager, Command};

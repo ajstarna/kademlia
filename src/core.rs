@@ -12,13 +12,13 @@ const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
 const K: usize = 20;
 
 #[derive(Debug)]
-pub struct Node {
+pub struct NodeState {
     pub my_info: NodeInfo,
     pub routing_table: RoutingTable,
     storage: Storage,
 }
 
-impl Node {
+impl NodeState {
     pub fn new(k: usize, ip: IpAddr, port: u16) -> Self {
         let my_id = NodeID::new();
         let my_info = NodeInfo {

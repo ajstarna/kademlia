@@ -5,10 +5,10 @@ use tokio::{sync::{mpsc, oneshot}};
 use tokio::time::{interval, Duration, Instant, MissedTickBehavior};
 
 use crate::{
-    node::identifier::{Key, NodeID, NodeInfo, ProbeID},
-    node::routing_table::InsertResult,
-    node::storage::Value,
-    node::Node,
+    core::identifier::{Key, NodeID, NodeInfo, ProbeID},
+    core::routing_table::InsertResult,
+    core::storage::Value,
+    core::NodeState,
 };
 use std::collections::{HashMap, HashSet};
 //use std::time::Instant;
@@ -87,7 +87,7 @@ struct PendingProbe {
 // Lookup-related types are defined in protocol::lookup submodule.
 
 pub struct ProtocolManager {
-    pub node: Node,
+    pub node: NodeState,
     pub socket: UdpSocket,
     rx: Option<mpsc::Receiver<Command>>,  // Optional: commands from a library user
     pub k: usize,
@@ -102,7 +102,7 @@ impl ProtocolManager {
 	let ip = addr.ip();
 	let port = addr.port();
 
-	let node = Node::new(k, ip, port);
+	let node = NodeState::new(k, ip, port);
 
         let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
         let pending_lookups: HashMap<NodeID, PendingLookup> = HashMap::new();
@@ -124,7 +124,7 @@ impl ProtocolManager {
         let ip = addr.ip();
         let port = addr.port();
 
-        let node = Node::new(k, ip, port);
+        let node = NodeState::new(k, ip, port);
 
         Ok(Self {
             node,

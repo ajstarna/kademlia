@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 
-use crate::node::identifier::{Key, NodeID, NodeInfo};
-use crate::node::storage::Value;
+use crate::core::identifier::{Key, NodeID, NodeInfo};
+use crate::core::storage::Value;
 
 // Timeouts specific to lookup requests
 pub(super) const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -155,4 +155,3 @@ pub(super) struct PendingLookup {
     pub(super) put_value: Option<Value>,
     pub(super) put_rx: Option<oneshot::Sender<bool>>,
 }
-
