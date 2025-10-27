@@ -14,13 +14,10 @@ use std::collections::{HashMap, HashSet};
 //use std::time::Instant;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum LookupKind {
-    Node,  // FIND_NODE
-    Value, // FIND_VALUE
-}
+mod command;
+mod lookup;
+pub use self::command::Command;
+use self::lookup::{Lookup, LookupKind, LookupResult, PendingLookup, LOOKUP_TIMEOUT};
 
 // each message type includes the NodeID of the sender
 #[derive(Serialize, Deserialize, Debug)]
@@ -61,35 +58,7 @@ enum Message {
 }
 
 
-/// Commands are the user-facing API into the ProtocolManager event loop.
-///
-/// A higher-level library (i.e., `KademliaDHT`) holds an `mpsc::Sender<Command>`
-/// and sends requests into the single-threaded protocol task. This ensures that
-/// all socket I/O, routing-table mutations, and lookup state are owned
-/// by the main event loop, run().
-pub enum Command {
-    /// Start a value lookup for `key`. The oneshot is completed with
-    /// `Some(value)` if any node returns the value, or `None` if the lookup
-    /// converges without a value.
-    Get {
-	key: Key,
-	rx: oneshot::Sender<Option<Value>>,
-    },
-    /// Store `value` under `key`. Internally performs a node lookup to find
-    /// the k closest peers and enqueues `Store` messages to them. The oneshot
-    /// indicates whether the operation was dispatched (`true`).
-    Put{
-	key: Key,
-	value: Value,
-	rx: oneshot::Sender<bool>,
-    },
-    /// Initiate bootstrap by sending `FindNode(self)` to the given seed
-    /// addresses. Responses are handled by the event loop to populate the
-    /// routing table and drive a self-lookup toward convergence.
-    Bootstrap {
-        addrs: Vec<SocketAddr>,
-    },
-}
+// Command enum is defined in protocol::command and re-exported above.
 
 /// Effect represents the "side effect" that `handle_message` wants the outer
 /// event loop to perform.
@@ -115,169 +84,7 @@ struct PendingProbe {
     deadline: Instant,
 }
 
-#[derive(Debug, Clone)]
-enum LookupResult {
-    ValueFound(Value),
-    NodeFound(NodeInfo),
-    Closest(Vec<NodeInfo>),
-}
-
-
-struct Lookup {
-    k: usize,
-    alpha: usize,
-    my_node_id: NodeID,
-    // keep the target as a NodeID, even though sometimes it is a key
-    target: NodeID,
-    kind: LookupKind,
-    rx: oneshot::Sender<Option<Value>>,  // To send the result back to the user who initiated the lookup
-    short_list: Vec<NodeInfo>,
-    already_queried: HashSet<NodeID>, // indicate who we have sent a request to already
-    in_flight: HashMap<NodeID, Instant>, // active queries with deadlines
-}
-
-impl Lookup {
-    pub fn new(
-        k: usize,
-        alpha: usize,
-        my_node_id: NodeID,
-        target: NodeID,
-        kind: LookupKind,
-	rx: oneshot::Sender<Option<Value>>,
-        initial_candidates: Vec<NodeInfo>,
-    ) -> Self {
-        let mut short_list = initial_candidates;
-        short_list.sort_by_key(|n| n.node_id.distance(&target));
-        Lookup {
-            k,
-            alpha,
-            my_node_id,
-            target,
-            kind,
-	    rx,
-            short_list,
-            already_queried: HashSet::new(),
-            in_flight: HashMap::new(),
-        }
-    }
-
-    /// Check if any of the in-flight queries have timed-out, and if so, remove them.
-    pub fn sweep_expired(&mut self, now: Instant) {
-        let mut expired = Vec::new();
-        for (key, deadline) in self.in_flight.iter() {
-            if *deadline <= now {
-                expired.push(*key);
-            }
-        }
-        for key in expired {
-            self.in_flight.remove(&key);
-        }
-    }
-
-    /// main method to be called on a lookup struct
-    /// If there are fewer than `alpha` queries in flight, we return Effects to top up the difference.
-    /// This can be called when we first start a lookup, or when we drive it forward after receiving a Nodes message.
-    pub fn top_up_alpha_requests(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
-
-        // find up to alpha candidate nodes that we haven't already sent a query to
-        let available: Vec<_> = self
-            .short_list
-            .iter()
-            .filter(|c| !self.already_queried.contains(&c.node_id))
-            .filter(|c| !self.in_flight.contains_key(&c.node_id))
-            .take(self.alpha - self.in_flight.len())
-            .cloned()
-            .collect();
-
-        for info in available {
-            let query = match self.kind {
-                LookupKind::Node => Message::FindNode {
-                    node_id: self.my_node_id,
-                    target: self.target,
-                },
-                LookupKind::Value => Message::FindValue {
-                    node_id: self.my_node_id,
-                    key: self.target,
-                },
-            };
-            let bytes = rmp_serde::to_vec(&query).expect("serialize FindNode");
-            effects.push(Effect::Send {
-                addr: SocketAddr::new(info.ip_address, info.udp_port),
-                bytes,
-            });
-
-            // now set a deadline and add to in flight
-            let deadline = Instant::now() + LOOKUP_TIMEOUT;
-            self.in_flight.insert(info.node_id, deadline);
-            self.already_queried.insert(info.node_id);
-        }
-        effects
-    }
-
-    /// A Nodes response message for this lookup was received.
-    /// We merge them into our existing shortlist, sort by distance to the target, then only
-    /// keep the top k.
-    pub fn merge_new_nodes(&mut self, nodes: Vec<NodeInfo>) {
-        self.short_list.extend(nodes);
-
-        let mut seen = HashSet::new();
-        self.short_list.retain(|n| seen.insert(n.node_id));
-
-        // sort by distance to target
-        self.short_list
-            .sort_by_key(|n| n.node_id.distance(&self.target));
-
-        if self.short_list.len() > self.k {
-            self.short_list.truncate(self.k);
-        }
-    }
-
-
-    /// Returns the final results if applicable, or None, if there are still outstanding
-    /// requests and we haven't found a target node yet.
-    /// Note: this method will not find a target Value, since that would get returned by a
-    /// ValueFound message instead.
-    pub fn possible_final_result(&self) -> Option<LookupResult> {
-	if let LookupKind::Node = self.kind {
-	    // we are looking for a specific node;
-	    // if it has been found by this point, then we are done.
-	    let target_node = self
-		.short_list.iter()
-		.find(|x| x.node_id == self.target);
-	    if let Some(target_node) = target_node {
-		return Some(LookupResult::NodeFound(*target_node));
-	    }
-	}
-
-	if self.in_flight.is_empty() {
-	    // nothing left to wait on, so return whatever we have
-	    return Some(LookupResult::Closest(self.short_list.clone()));
-	}
-
-	// otherwise, if we have more requests in flight, then lets
-	// keep waiting -> no final result to report
-	None
-    }
-
-    /// A lookup is considered finished when either:
-    /// - For Node lookups: the exact target node has been found, or
-    /// - There are no in-flight requests remaining (converged shortlist).
-    pub fn is_finished(&self) -> bool {
-        self.possible_final_result().is_some()
-    }
-
-
-}
-
-struct PendingLookup {
-    lookup: Lookup,
-    deadline: Instant, // TODO: does a lookup itself need a deadline, or are the in flight request timeouts sufficient?
-    // When a Put command initiates a Node lookup to find closest peers,
-    // we stash the value and a completion channel here to send Stores upon completion.
-    put_value: Option<Value>,
-    put_rx: Option<oneshot::Sender<bool>>,
-}
+// Lookup-related types are defined in protocol::lookup submodule.
 
 pub struct ProtocolManager {
     pub node: Node,
