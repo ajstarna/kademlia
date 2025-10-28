@@ -73,6 +73,7 @@ enum Commands {
         /// Optional 40-hex key (optionally 0x-prefixed); when omitted, SHA1(value)
         #[arg(long = "key")]
         key: Option<String>,
+
     },
 }
 
@@ -129,11 +130,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Get {
-            bind,
-            bootstrap,
-            key,
-        } => {
+        Commands::Get { bind, bootstrap, key } => {
             println!("Starting ephemeral get on {}...", bind);
             let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone()).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -153,13 +150,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Put {
-            bind,
-            bootstrap,
-            data,
-            value,
-            key,
-        } => {
+        Commands::Put { bind, bootstrap, data, value, key } => {
             println!("Starting ephemeral put on {}...", bind);
             let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone()).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
