@@ -18,3 +18,5 @@ target/
 
 # emacs temp
 *~
+
+**/logs
