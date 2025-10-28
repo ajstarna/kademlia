@@ -1,14 +1,16 @@
-- add a binary (main.rs?) with a simple clap CLI to run a headless node.
-    - It should be able to be one of the bootstrap nodes, or it can join an existing network.
+- debug run_network.sh
 
 - add logging to help see whats happening.
 
 - bucket refresh
 
-- make sure we are removing dead nodes properly when they don't respond or other
+- make sure we are removing dead nodes properly when they don't respond or other cases.
+
+- general skim paper to make sure we are covering everything
 
 - the DHT class should use actual errors types since user facing
 
 - how to test at scale and in a real network setting?
-   - even some manual testing with the binary?
    - if we mock udp we could test large scale locally. simulate a network with flakiness
+
+- test with someone across the internet
