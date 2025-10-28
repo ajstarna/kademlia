@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
-use tokio::{sync::{mpsc, oneshot}};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, Duration, Instant, MissedTickBehavior};
 
 use crate::{
@@ -19,6 +19,12 @@ mod lookup;
 pub use self::command::Command;
 use self::lookup::{Lookup, LookupKind, LookupResult, PendingLookup, LOOKUP_TIMEOUT};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeRole {
+    Peer,
+    Client,
+}
+
 // each message type includes the NodeID of the sender
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -26,37 +32,43 @@ enum Message {
     Ping {
         node_id: NodeID,
         probe_id: ProbeID, // a unique id for this specific request
+        is_client: bool,
     },
     Pong {
         node_id: NodeID,
         probe_id: ProbeID, // a unique id for this specific request
+        is_client: bool,
     },
     Store {
         node_id: NodeID,
         key: Key,
         value: Value,
+        is_client: bool,
     },
     FindNode {
         node_id: NodeID,
         target: NodeID,
+        is_client: bool,
     },
     Nodes {
         node_id: NodeID,
         target: NodeID, // we need to include the target to map the nodes to the lookup
         nodes: Vec<NodeInfo>,
+        is_client: bool,
     },
     FindValue {
         node_id: NodeID,
         key: Key,
+        is_client: bool,
     },
     ValueFound {
         node_id: NodeID,
         key: Key,
         value: Value,
+        is_client: bool,
     },
     // Note: start of lookups is driven by Command from the API, not via a Message.
 }
-
 
 // Command enum is defined in protocol::command and re-exported above.
 
@@ -89,32 +101,50 @@ struct PendingProbe {
 pub struct ProtocolManager {
     pub node: NodeState,
     pub socket: UdpSocket,
-    rx: Option<mpsc::Receiver<Command>>,  // Optional: commands from a library user
+    rx: Option<mpsc::Receiver<Command>>, // Optional: commands from a library user
     pub k: usize,
     pub alpha: usize, // concurrency parameter
     pub pending_probes: HashMap<ProbeID, PendingProbe>,
     pub pending_lookups: HashMap<NodeID, PendingLookup>,
+    role: NodeRole,
 }
 
 impl ProtocolManager {
-    pub fn new(socket: UdpSocket, rx: mpsc::Receiver<Command>, k: usize, alpha: usize) -> anyhow::Result<Self> {
-	let addr = socket.local_addr()?;
-	let ip = addr.ip();
-	let port = addr.port();
+    pub fn new(
+        socket: UdpSocket,
+        rx: mpsc::Receiver<Command>,
+        k: usize,
+        alpha: usize,
+    ) -> anyhow::Result<Self> {
+        let addr = socket.local_addr()?;
+        let ip = addr.ip();
+        let port = addr.port();
 
-	let node = NodeState::new(k, ip, port);
+        let node = NodeState::new(k, ip, port);
 
         let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
         let pending_lookups: HashMap<NodeID, PendingLookup> = HashMap::new();
         Ok(Self {
             node,
             socket,
-	    rx: Some(rx),
+            rx: Some(rx),
             k,
             alpha,
             pending_probes,
             pending_lookups,
+            role: NodeRole::Peer,
         })
+    }
+
+    pub fn new_client(
+        socket: UdpSocket,
+        rx: mpsc::Receiver<Command>,
+        k: usize,
+        alpha: usize,
+    ) -> anyhow::Result<Self> {
+        let mut pm = Self::new(socket, rx, k, alpha)?;
+        pm.role = NodeRole::Client;
+        Ok(pm)
     }
 
     /// Add a known peer directly into the routing table.
@@ -135,6 +165,7 @@ impl ProtocolManager {
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
                         probe_id,
+                        is_client: self.is_client(),
                     };
                     if let Ok(bytes) = rmp_serde::to_vec(&ping) {
                         let addr = SocketAddr::new(lru.ip_address, lru.udp_port);
@@ -142,8 +173,13 @@ impl ProtocolManager {
                         // but here we send directly for simplicity.
                         let _ = self.socket.send_to(&bytes, addr).await;
                         let deadline = Instant::now() + PROBE_TIMEOUT;
-                        self.pending_probes
-                            .insert(probe_id, PendingProbe { peer: lru, deadline });
+                        self.pending_probes.insert(
+                            probe_id,
+                            PendingProbe {
+                                peer: lru,
+                                deadline,
+                            },
+                        );
                     }
                     break;
                 }
@@ -169,7 +205,16 @@ impl ProtocolManager {
             alpha,
             pending_probes: HashMap::new(),
             pending_lookups: HashMap::new(),
+            role: NodeRole::Peer,
         })
+    }
+
+    pub fn is_client(&self) -> bool {
+        matches!(self.role, NodeRole::Client)
+    }
+
+    pub fn role(&self) -> NodeRole {
+        self.role
     }
 
     fn observe_contact(&mut self, src_addr: SocketAddr, node_id: NodeID) -> Option<Effect> {
@@ -193,6 +238,7 @@ impl ProtocolManager {
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
                         probe_id,
+                        is_client: self.is_client(),
                     };
                     let bytes = rmp_serde::to_vec(&ping).expect("serialize probe Ping");
                     return Some(Effect::StartProbe {
@@ -207,7 +253,7 @@ impl ProtocolManager {
         }
     }
 
-    async fn handle_command(&mut self, command: Command) -> anyhow::Result<Vec<Effect>>{
+    async fn handle_command(&mut self, command: Command) -> anyhow::Result<Vec<Effect>> {
         let effects = match command {
             Command::Get { key, rx } => {
                 // Get corresponds to a Value lookup
@@ -221,20 +267,21 @@ impl ProtocolManager {
                 let my_id = self.node.my_info.node_id;
                 // Initialize a pending self-lookup with empty initial candidates
                 let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
-                let mut effs = self.init_lookup(
-                    my_id,
-                    LookupKind::Node,
-                    dummy_tx,
-                    Vec::new(),
-                    None,
-                    None,
-                );
+                let mut effs =
+                    self.init_lookup(my_id, LookupKind::Node, dummy_tx, Vec::new(), None, None);
 
                 // Send initial FindNode(self) to the seed addresses
-                let query = Message::FindNode { node_id: my_id, target: my_id };
+                let query = Message::FindNode {
+                    node_id: my_id,
+                    target: my_id,
+                    is_client: self.is_client(),
+                };
                 let bytes = rmp_serde::to_vec(&query)?;
                 for addr in addrs {
-                    effs.push(Effect::Send { addr, bytes: bytes.clone() });
+                    effs.push(Effect::Send {
+                        addr,
+                        bytes: bytes.clone(),
+                    });
                 }
                 effs
             }
@@ -260,6 +307,7 @@ impl ProtocolManager {
             self.k,
             self.alpha,
             self.node.my_info.node_id,
+            self.is_client(),
             key,
             kind,
             rx,
@@ -282,12 +330,22 @@ impl ProtocolManager {
         lookup_effects
     }
 
-    fn start_lookup(&mut self, key: NodeID, kind: LookupKind, rx: oneshot::Sender<Option<Value>>) -> Vec<Effect> {
+    fn start_lookup(
+        &mut self,
+        key: NodeID,
+        kind: LookupKind,
+        rx: oneshot::Sender<Option<Value>>,
+    ) -> Vec<Effect> {
         let initial = self.node.routing_table.k_closest(key);
         self.init_lookup(key, kind, rx, initial, None, None)
     }
 
-    fn start_lookup_with_put(&mut self, key: NodeID, value: Value, put_rx: oneshot::Sender<bool>) -> Vec<Effect> {
+    fn start_lookup_with_put(
+        &mut self,
+        key: NodeID,
+        value: Value,
+        put_rx: oneshot::Sender<bool>,
+    ) -> Vec<Effect> {
         // We need a Lookup to drive the search for k closest nodes to the key.
         // The Lookup requires a oneshot<Option<Value>> even though Put doesn't use it.
         let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
@@ -309,22 +367,31 @@ impl ProtocolManager {
         src_addr: SocketAddr,
     ) -> anyhow::Result<Vec<Effect>> {
         let mut effects = Vec::new();
-        let node_id = match msg {
-            Message::Ping { node_id, probe_id } => {
+        let (node_id, peer_is_client) = match msg {
+            Message::Ping {
+                node_id,
+                probe_id,
+                is_client,
+            } => {
                 println!("Received Ping from {node_id:?}");
                 let pong = Message::Pong {
                     node_id: self.node.my_info.node_id,
                     probe_id,
+                    is_client: self.is_client(),
                 };
                 let bytes = rmp_serde::to_vec(&pong)?;
                 effects.push(Effect::Send {
                     addr: src_addr,
                     bytes,
                 });
-                node_id
+                (node_id, is_client)
             }
 
-            Message::Pong { node_id, probe_id } => {
+            Message::Pong {
+                node_id,
+                probe_id,
+                is_client,
+            } => {
                 println!("Received Pong from {node_id:?}");
                 // Maybe mark the node as alive or update routing table
                 if let Some(pending) = self.pending_probes.remove(&probe_id) {
@@ -335,21 +402,27 @@ impl ProtocolManager {
                     // TODO: is there more to think about here?
                     println!("A Pong was received without an associated probe_id. Interesting. {node_id:?}");
                 }
-                node_id
+                (node_id, is_client)
             }
 
             Message::Store {
                 node_id,
                 key,
                 value,
+                is_client,
             } => {
                 println!("Store request: key={key:?}, value={value:?}");
-                // Store the value in your local store or database
-                self.node.store(key, value);
-                node_id
+                if !self.is_client() {
+                    self.node.store(key, value);
+                }
+                (node_id, is_client)
             }
 
-            Message::FindNode { node_id, target } => {
+            Message::FindNode {
+                node_id,
+                target,
+                is_client,
+            } => {
                 println!("FindNode request: looking for {target:?}");
                 // Find closest nodes to the given ID in your routing table
                 let closest = self.node.routing_table.k_closest(target);
@@ -357,19 +430,21 @@ impl ProtocolManager {
                     node_id: self.node.my_info.node_id,
                     target,
                     nodes: closest,
+                    is_client: self.is_client(),
                 };
                 let bytes = rmp_serde::to_vec(&nodes)?;
                 effects.push(Effect::Send {
                     addr: src_addr,
                     bytes,
                 });
-                node_id
+                (node_id, is_client)
             }
 
             Message::Nodes {
                 node_id,
                 target,
                 nodes,
+                is_client,
             } => {
                 // observe all the new nodes we just learned about
                 for n in &nodes {
@@ -380,46 +455,49 @@ impl ProtocolManager {
                     }
                 }
 
-		let mut remove_lookup: bool = false;  // remove if there are no more in-flight requests
+                let mut remove_lookup: bool = false; // remove if there are no more in-flight requests
+                let i_am_client = self.is_client();
                 if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
                     pending_lookup.lookup.in_flight.remove(&node_id);
                     pending_lookup.lookup.merge_new_nodes(nodes);
 
-
                     let lookup_effects = pending_lookup.lookup.top_up_alpha_requests();
                     effects.extend(lookup_effects);
 
-		    if pending_lookup.lookup.is_finished() {
-		        // If this lookup was initiated by a Put, we can already enqueue Store effects
-		        // (we'll finalize and fire the Put ack after removing the lookup below).
-                    if let Some(value) = pending_lookup.put_value.as_ref() {
-                        let nodes_to_store = pending_lookup.lookup.short_list.clone();
-                        for n in nodes_to_store.iter().cloned() {
-                            let store = Message::Store {
-                                node_id: self.node.my_info.node_id,
-                                key: target,
-                                value: value.clone(),
-                            };
-                            let bytes = rmp_serde::to_vec(&store)?;
-                            effects.push(Effect::Send {
-                                addr: SocketAddr::new(n.ip_address, n.udp_port),
-                                bytes,
-                            });
+                    if pending_lookup.lookup.is_finished() {
+                        // If this lookup was initiated by a Put, we can already enqueue Store effects
+                        // (we'll finalize and fire the Put ack after removing the lookup below).
+                        if let Some(value) = pending_lookup.put_value.as_ref() {
+                            let nodes_to_store = pending_lookup.lookup.short_list.clone();
+                            for n in nodes_to_store.iter().cloned() {
+                                let store = Message::Store {
+                                    node_id: self.node.my_info.node_id,
+                                    key: target,
+                                    value: value.clone(),
+                                    is_client: i_am_client,
+                                };
+                                let bytes = rmp_serde::to_vec(&store)?;
+                                effects.push(Effect::Send {
+                                    addr: SocketAddr::new(n.ip_address, n.udp_port),
+                                    bytes,
+                                });
+                            }
+                            if !i_am_client {
+                                let my_dist = self.node.my_info.node_id.distance(&target);
+                                let max_peer_dist = nodes_to_store
+                                    .iter()
+                                    .map(|n| n.node_id.distance(&target))
+                                    .max();
+                                if max_peer_dist.map_or(true, |d| my_dist <= d) {
+                                    self.node.store(target, value.clone());
+                                }
+                            }
                         }
-                        let my_dist = self.node.my_info.node_id.distance(&target);
-                        let max_peer_dist = nodes_to_store
-                            .iter()
-                            .map(|n| n.node_id.distance(&target))
-                            .max();
-                        if max_peer_dist.map_or(true, |d| my_dist <= d) {
-                            self.node.store(target, value.clone());
-                        }
+                        remove_lookup = true;
                     }
-                    remove_lookup = true;
-                }
                 } else {
-		    // we got a nodes message with no corresponding lookup... curious.
-		}
+                    // we got a nodes message with no corresponding lookup... curious.
+                }
                 if remove_lookup {
                     if let Some(mut finished) = self.pending_lookups.remove(&target) {
                         // If this was a Put-initiated Node lookup, dispatch Store messages to shortlist
@@ -430,6 +508,7 @@ impl ProtocolManager {
                                     node_id: self.node.my_info.node_id,
                                     key: target,
                                     value: value.clone(),
+                                    is_client: i_am_client,
                                 };
                                 let bytes = rmp_serde::to_vec(&store)?;
                                 effects.push(Effect::Send {
@@ -437,13 +516,15 @@ impl ProtocolManager {
                                     bytes,
                                 });
                             }
-                            let my_dist = self.node.my_info.node_id.distance(&target);
-                            let max_peer_dist = nodes_to_store
-                                .iter()
-                                .map(|n| n.node_id.distance(&target))
-                                .max();
-                            if max_peer_dist.map_or(true, |d| my_dist <= d) {
-                                self.node.store(target, value.clone());
+                            if !i_am_client {
+                                let my_dist = self.node.my_info.node_id.distance(&target);
+                                let max_peer_dist = nodes_to_store
+                                    .iter()
+                                    .map(|n| n.node_id.distance(&target))
+                                    .max();
+                                if max_peer_dist.map_or(true, |d| my_dist <= d) {
+                                    self.node.store(target, value.clone());
+                                }
                             }
                             if let Some(tx) = finished.put_rx.take() {
                                 let _ = tx.send(true);
@@ -454,10 +535,14 @@ impl ProtocolManager {
                         let _ = finished.lookup.rx.send(None);
                     }
                 }
-                node_id
+                (node_id, is_client)
             }
 
-            Message::FindValue { node_id, key } => {
+            Message::FindValue {
+                node_id,
+                key,
+                is_client,
+            } => {
                 println!("FindValue request: key={key:?}");
                 // Lookup the value, or return closest nodes if not found
                 if let Some(value) = self.node.get(&key) {
@@ -465,6 +550,7 @@ impl ProtocolManager {
                         node_id: self.node.my_info.node_id,
                         key,
                         value: value.clone(),
+                        is_client: self.is_client(),
                     };
                     let bytes = rmp_serde::to_vec(&found)?;
                     effects.push(Effect::Send {
@@ -478,6 +564,7 @@ impl ProtocolManager {
                         node_id: self.node.my_info.node_id,
                         target: key,
                         nodes: closest,
+                        is_client: self.is_client(),
                     };
                     let bytes = rmp_serde::to_vec(&nodes)?;
                     effects.push(Effect::Send {
@@ -485,30 +572,34 @@ impl ProtocolManager {
                         bytes,
                     });
                 }
-                node_id
+                (node_id, is_client)
             }
             Message::ValueFound {
                 node_id,
                 key,
                 value,
+                is_client,
             } => {
                 if let Some(pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
                     println!("Lookup for {key:?} completed with value from {node_id:?}");
 
                     // Send the found value back to the user
-		    let _ = pending_lookup.lookup.rx.send(Some(value.clone()));
-
+                    let _ = pending_lookup.lookup.rx.send(Some(value.clone()));
                 }
                 // Optionally Cache the value in our own local storage
-                self.node.store(key, value);
-                node_id
+                if !self.is_client() {
+                    self.node.store(key, value);
+                }
+                (node_id, is_client)
             }
         };
 
         // now we add the peer to our routing_table
-        if let Some(eff) = self.observe_contact(src_addr, node_id) {
-            effects.push(eff);
+        if !peer_is_client {
+            if let Some(eff) = self.observe_contact(src_addr, node_id) {
+                effects.push(eff);
+            }
         }
 
         Ok(effects)
@@ -567,7 +658,7 @@ impl ProtocolManager {
         lookup_effects
     }
 
-    /// This for messages in a loop, and respond accordingly
+    /// Listen for messages in an infinite loop, and respond accordingly
     pub async fn run(mut self) {
         let mut buf = [0u8; 1024];
 
@@ -576,20 +667,26 @@ impl ProtocolManager {
 
         loop {
             tokio::select! {
-                // message receive arm
-                result = self.socket.recv_from(&mut buf) =>  {
-                    match result {
-                    Ok((len, src_addr)) => {
-                        println!("Received {len} bytes from {src_addr}");
-                        let msg = rmp_serde::from_slice::<Message>(&buf[..len]);
-                        match msg {
-                        Ok(msg) => {
-                            let effects = self.handle_message(msg, src_addr).await;
-			    if let Ok(effects) = effects {
-				for eff in effects {
-				    self.apply_effect(eff).await;
-				}
-			    }
+                    // message receive arm
+                    result = self.socket.recv_from(&mut buf) =>  {
+                        match result {
+                        Ok((len, src_addr)) => {
+                            println!("Received {len} bytes from {src_addr}");
+                            let msg = rmp_serde::from_slice::<Message>(&buf[..len]);
+                            match msg {
+                            Ok(msg) => {
+                                let effects = self.handle_message(msg, src_addr).await;
+                    if let Ok(effects) = effects {
+                    for eff in effects {
+                        self.apply_effect(eff).await;
+                    }
+                    }
+                            }
+                            Err(e) => {
+                                eprintln!("Error receiving message: {e}");
+                                continue;
+                            }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Error receiving message: {e}");
@@ -597,47 +694,41 @@ impl ProtocolManager {
                         }
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Error receiving message: {e}");
-                        continue;
-                    }
-                    }
-                }
 
-		// See if the user has given us any commands
-                maybe_command = async {
-                    match self.rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending::<Option<Command>>().await,  // effectively disable this select arm
-                    }
-                } => {
-                    match maybe_command {
-                        Some(command) => {
-                            let effects = self.handle_command(command).await;
-                            if let Ok(effects) = effects {
-                                for eff in effects {
-                                    self.apply_effect(eff).await;
+            // See if the user has given us any commands
+                    maybe_command = async {
+                        match self.rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending::<Option<Command>>().await,  // effectively disable this select arm
+                        }
+                    } => {
+                        match maybe_command {
+                            Some(command) => {
+                                let effects = self.handle_command(command).await;
+                                if let Ok(effects) = effects {
+                                    for eff in effects {
+                                        self.apply_effect(eff).await;
+                                    }
                                 }
                             }
-                        }
-                        None => {
-                            // Command channel closed; disable commands and continue headless.
-                            self.rx = None;
+                            None => {
+                                // Command channel closed; disable commands and continue headless.
+                                self.rx = None;
+                            }
                         }
                     }
-                }
 
 
-                _ = ticker.tick() => {
-                    let now = Instant::now();
-            let lookup_effects = self.sweep_timeouts_and_topup(now);
+                    _ = ticker.tick() => {
+                        let now = Instant::now();
+                let lookup_effects = self.sweep_timeouts_and_topup(now);
 
-                    for eff in lookup_effects {
-            self.apply_effect(eff).await;
+                        for eff in lookup_effects {
+                self.apply_effect(eff).await;
+                        }
+
                     }
-
-                }
-                }
+                    }
         }
     }
 }
@@ -658,6 +749,7 @@ mod test {
         let msg = Message::Ping {
             node_id: src_id,
             probe_id,
+            is_client: false,
         };
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
 
@@ -675,7 +767,7 @@ mod test {
                 assert_eq!(addr, src);
                 let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
                 assert!(
-                    matches!(reply, Message::Pong { node_id, probe_id: pid } if node_id == pm.node.my_info.node_id && pid == probe_id )
+                    matches!(reply, Message::Pong { node_id, probe_id: pid, .. } if node_id == pm.node.my_info.node_id && pid == probe_id )
                 );
             }
             _ => panic!("expected Send Pong effect, got {:?}", effect),
@@ -698,6 +790,7 @@ mod test {
             node_id: src_id,
             key: key.clone(),
             value: value.clone(),
+            is_client: false,
         };
 
         pm.handle_message(store_msg, src).await.unwrap();
@@ -713,6 +806,7 @@ mod test {
         let find_msg = Message::FindValue {
             node_id: src_id,
             key: key.clone(),
+            is_client: false,
         };
 
         let find_effects = pm.handle_message(find_msg, src).await.unwrap();
@@ -731,6 +825,7 @@ mod test {
                         node_id,
                         key: k,
                         value: v,
+                        ..
                     } => {
                         assert_eq!(node_id, pm.node.my_info.node_id);
                         assert_eq!(k, key);
@@ -758,6 +853,7 @@ mod test {
         let msg: Message = Message::FindValue {
             node_id: src_id,
             key,
+            is_client: false,
         };
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
 
@@ -791,6 +887,7 @@ mod test {
         let msg: Message = Message::FindValue {
             node_id: src_id,
             key,
+            is_client: false,
         };
         let src: SocketAddr = "127.0.0.1:4001".parse().unwrap();
 
@@ -843,7 +940,10 @@ mod test {
         // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let effects = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
+        let effects = pm
+            .handle_command(Command::Get { key, rx: tx })
+            .await
+            .unwrap();
 
         // Collect sends and decode; should be alpha sends to the three closest peers
         let mut dests = Vec::new();
@@ -892,7 +992,10 @@ mod test {
         // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let _ = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
+        let _ = pm
+            .handle_command(Command::Get { key, rx: tx })
+            .await
+            .unwrap();
 
         // Nodes reply from p1 introducing a new peer p4
         let p4 = make_peer(4, 6004, 0x03);
@@ -900,6 +1003,7 @@ mod test {
             node_id: p1.node_id,
             target,
             nodes: vec![p4],
+            is_client: false,
         };
         let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_msg, p1_addr).await.unwrap();
@@ -945,7 +1049,10 @@ mod test {
         // Start lookup via Command::Get: should send 2 initial FindValue requests (alpha=2)
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let effects = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
+        let effects = pm
+            .handle_command(Command::Get { key, rx: tx })
+            .await
+            .unwrap();
 
         let mut initial_dests = Vec::new();
         for eff in effects.into_iter() {
@@ -1005,13 +1112,17 @@ mod test {
         // Start the lookup for this target via Command::Get
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let _ = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
+        let _ = pm
+            .handle_command(Command::Get { key, rx: tx })
+            .await
+            .unwrap();
 
         // Act: simulate a Nodes reply from p1 that introduces p_new
         let nodes_msg = Message::Nodes {
             node_id: p1.node_id,
             target,
             nodes: vec![p_new],
+            is_client: false,
         };
         let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_msg, p1_addr).await.unwrap();
@@ -1062,7 +1173,10 @@ mod test {
 
         // Start the lookup (Value) via Command::Get
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let effects = pm.handle_command(Command::Get { key, rx: tx }).await.unwrap();
+        let effects = pm
+            .handle_command(Command::Get { key, rx: tx })
+            .await
+            .unwrap();
 
         // Expect a FindValue sent to p1
         let mut sent_to_p1 = false;
@@ -1084,6 +1198,7 @@ mod test {
             node_id: p1.node_id,
             target,
             nodes: vec![p2],
+            is_client: false,
         };
         let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_from_p1, p1_addr).await.unwrap();
@@ -1108,6 +1223,7 @@ mod test {
             node_id: p2.node_id,
             target,
             nodes: vec![p3],
+            is_client: false,
         };
         let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
         let effects = pm.handle_message(nodes_from_p2, p2_addr).await.unwrap();
@@ -1133,6 +1249,7 @@ mod test {
             node_id: p3.node_id,
             key,
             value: value.clone(),
+            is_client: false,
         };
         let p3_addr = SocketAddr::new(p3.ip_address, p3.udp_port);
         let _ = pm.handle_message(found, p3_addr).await.unwrap();
@@ -1164,7 +1281,14 @@ mod test {
 
         // Start a Node lookup towards `target` via Command::Put (performs node lookup under the hood)
         let (put_tx, _put_rx) = tokio::sync::oneshot::channel::<bool>();
-        let effects = pm.handle_command(Command::Put { key: target, value: b"x".to_vec(), rx: put_tx }).await.unwrap();
+        let effects = pm
+            .handle_command(Command::Put {
+                key: target,
+                value: b"x".to_vec(),
+                rx: put_tx,
+            })
+            .await
+            .unwrap();
 
         // Expect exactly alpha initial FindNode queries
         let initial_sends: Vec<SocketAddr> = effects
@@ -1181,13 +1305,18 @@ mod test {
                 _ => None,
             })
             .collect();
-        assert_eq!(initial_sends.len(), 2, "should send alpha FindNode requests");
+        assert_eq!(
+            initial_sends.len(),
+            2,
+            "should send alpha FindNode requests"
+        );
 
         // Simulate a Nodes reply from p1 that does not improve the shortlist (duplicates only)
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
             nodes: vec![p1, p2],
+            is_client: false,
         };
         let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_from_p1, p1_addr).await.unwrap();
@@ -1207,13 +1336,17 @@ mod test {
                 _ => None,
             })
             .collect();
-        assert!(topups_after_p1.is_empty(), "no new queries should be issued");
+        assert!(
+            topups_after_p1.is_empty(),
+            "no new queries should be issued"
+        );
 
         // Simulate a Nodes reply from p2 that also does not improve the shortlist
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
             nodes: vec![p1, p2],
+            is_client: false,
         };
         let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
         let effects = pm.handle_message(nodes_from_p2, p2_addr).await.unwrap();
@@ -1233,7 +1366,10 @@ mod test {
                 _ => None,
             })
             .collect();
-        assert!(topups_after_p2.is_empty(), "no further queries should be issued");
+        assert!(
+            topups_after_p2.is_empty(),
+            "no further queries should be issued"
+        );
 
         // Optional: sweep to mimic periodic maintenance; still no effects expected
         let effects = pm.sweep_timeouts_and_topup(Instant::now());
@@ -1241,7 +1377,10 @@ mod test {
             .into_iter()
             .filter(|eff| match eff {
                 Effect::Send { bytes, .. } => {
-                    matches!(rmp_serde::from_slice::<Message>(bytes), Ok(Message::FindNode { .. }))
+                    matches!(
+                        rmp_serde::from_slice::<Message>(bytes),
+                        Ok(Message::FindNode { .. })
+                    )
                 }
                 _ => false,
             })
@@ -1312,9 +1451,13 @@ mod test {
             node_id: p1.node_id,
             target,
             nodes: vec![p1, p2],
+            is_client: false,
         };
         let effects1 = pm
-            .handle_message(nodes_from_p1, std::net::SocketAddr::new(p1.ip_address, p1.udp_port))
+            .handle_message(
+                nodes_from_p1,
+                std::net::SocketAddr::new(p1.ip_address, p1.udp_port),
+            )
             .await
             .unwrap();
 
@@ -1323,9 +1466,13 @@ mod test {
             node_id: p2.node_id,
             target,
             nodes: vec![p1, p2],
+            is_client: false,
         };
         let effects2 = pm
-            .handle_message(nodes_from_p2, std::net::SocketAddr::new(p2.ip_address, p2.udp_port))
+            .handle_message(
+                nodes_from_p2,
+                std::net::SocketAddr::new(p2.ip_address, p2.udp_port),
+            )
             .await
             .unwrap();
 
@@ -1335,7 +1482,10 @@ mod test {
         for eff in effects1.into_iter().chain(effects2.into_iter()) {
             if let Effect::Send { addr, bytes } = eff {
                 if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
-                    if let Message::Store { key: k, value: v, .. } = msg {
+                    if let Message::Store {
+                        key: k, value: v, ..
+                    } = msg
+                    {
                         assert_eq!(k, key);
                         assert_eq!(v, value);
                         store_dests.push(addr);
@@ -1351,8 +1501,14 @@ mod test {
         .into_iter()
         .collect();
         let got_store: std::collections::HashSet<_> = store_dests.into_iter().collect();
-        assert!(pm.pending_lookups.get(&target).is_none(), "lookup should be removed on completion");
-        assert_eq!(got_store, expected_store, "should STORE to both final peers");
+        assert!(
+            pm.pending_lookups.get(&target).is_none(),
+            "lookup should be removed on completion"
+        );
+        assert_eq!(
+            got_store, expected_store,
+            "should STORE to both final peers"
+        );
 
         // And the Put ack should be true
         let ok = put_rx.await.expect("put oneshot should complete");

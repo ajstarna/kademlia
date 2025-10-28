@@ -1,8 +1,8 @@
 use kademlia::dht::KademliaDHT;
-use kademlia::protocol::{ProtocolManager, Command};
-use kademlia::{NodeID, Key, Value};
-use tokio::net::UdpSocket;
+use kademlia::protocol::{Command, ProtocolManager};
+use kademlia::{Key, NodeID, Value};
 use std::net::SocketAddr;
+use tokio::net::UdpSocket;
 
 #[tokio::test()]
 async fn end_to_end_put_get() -> anyhow::Result<()> {
@@ -38,7 +38,7 @@ async fn end_to_end_put_get() -> anyhow::Result<()> {
 
     // Start a DHT node bound to an ephemeral local port, bootstrapping explicitly against the two seeds
     let bootstrap_addrs: Vec<SocketAddr> = vec![s1_addr, s2_addr];
-    let dht = KademliaDHT::start("127.0.0.1:0", bootstrap_addrs).await?;
+    let dht = KademliaDHT::start_client("127.0.0.1:0", bootstrap_addrs).await?;
 
     // Allow bootstrap FindNode/Nodes to exchange and populate the DHT's routing table
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -99,7 +99,11 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
         let tx_clone = tx.clone();
         tokio::spawn(pm.run());
         // Bootstrap to seeds
-        tx_clone.send(Command::Bootstrap { addrs: seed_addrs.clone() }).await?;
+        tx_clone
+            .send(Command::Bootstrap {
+                addrs: seed_addrs.clone(),
+            })
+            .await?;
         all_senders.push(tx);
         all_infos.push(info);
     }
@@ -112,7 +116,7 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
     let value: Value = b"replication-value".to_vec();
 
     // Use a real DHT handle for the client behavior
-    let client_dht = KademliaDHT::start("127.0.0.1:0", seed_addrs.clone()).await?;
+    let client_dht = KademliaDHT::start_client("127.0.0.1:0", seed_addrs.clone()).await?;
     let client_info = client_dht.node_info();
     let _ = client_dht.put(key, value.clone()).await?;
 
@@ -136,7 +140,8 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
             }
         }
 
-        let mut expected_set: std::collections::HashSet<NodeID> = expected_topk.iter().copied().collect();
+        let mut expected_set: std::collections::HashSet<NodeID> =
+            expected_topk.iter().copied().collect();
 
         // Include client node's value presence
         if client_dht.debug_has_value(key).await? {

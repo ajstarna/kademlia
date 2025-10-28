@@ -26,6 +26,7 @@ pub(super) struct Lookup {
     pub(super) k: usize,
     pub(super) alpha: usize,
     pub(super) my_node_id: NodeID,
+    pub(super) is_client: bool,
     // keep the target as a NodeID, even though sometimes it is a key
     pub(super) target: NodeID,
     pub(super) kind: LookupKind,
@@ -40,17 +41,22 @@ impl Lookup {
         k: usize,
         alpha: usize,
         my_node_id: NodeID,
+        is_client: bool,
         target: NodeID,
         kind: LookupKind,
         rx: oneshot::Sender<Option<Value>>,
         initial_candidates: Vec<NodeInfo>,
     ) -> Self {
         let mut short_list = initial_candidates;
+        if is_client {
+            short_list.retain(|n| n.node_id != my_node_id);
+        }
         short_list.sort_by_key(|n| n.node_id.distance(&target));
         Lookup {
             k,
             alpha,
             my_node_id,
+            is_client,
             target,
             kind,
             rx,
@@ -79,10 +85,12 @@ impl Lookup {
                 LookupKind::Node => super::Message::FindNode {
                     node_id: self.my_node_id,
                     target: self.target,
+                    is_client: self.is_client,
                 },
                 LookupKind::Value => super::Message::FindValue {
                     node_id: self.my_node_id,
                     key: self.target,
+                    is_client: self.is_client,
                 },
             };
             let bytes = rmp_serde::to_vec(&query).expect("serialize FindNode/FindValue");
@@ -105,6 +113,9 @@ impl Lookup {
 
         let mut seen = HashSet::new();
         self.short_list.retain(|n| seen.insert(n.node_id));
+        if self.is_client {
+            self.short_list.retain(|n| n.node_id != self.my_node_id);
+        }
 
         // sort by distance to target
         self.short_list

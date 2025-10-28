@@ -3,6 +3,10 @@
 
 - add logging to help see whats happening.
 
+- bucket refresh
+
+- make sure we are removing dead nodes properly when they don't respond or other
+
 - the DHT class should use actual errors types since user facing
 
 - how to test at scale and in a real network setting?

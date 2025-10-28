@@ -42,4 +42,3 @@ impl NodeState {
         self.storage.get(key)
     }
 }
-
