@@ -14,8 +14,8 @@ use crate::core::storage::Value;
 /// Variants map to the core DHT operations:
 /// - `Get`: Start a value lookup for `key`; the provided oneshot is fulfilled
 ///   with `Some(value)` if found, or `None` otherwise.
-/// - `Put`: Find the k closest nodes to `key` and send `Store` to them; the
-///   provided oneshot is fulfilled with `true` when the store fanout is queued.
+/// - `Put`: Find the k closest nodes to `key` and send `Store` to them; fire-and-forget
+///   without an acknowledgement, matching typical Kademlia semantics.
 /// - `Bootstrap`: Seed addresses to initiate a Kademlia self-lookup; used to
 ///   populate the routing table when first joining the network.
 pub enum Command {
@@ -29,11 +29,7 @@ pub enum Command {
     /// Store `value` under `key`. Internally performs a node lookup to find
     /// the k closest peers and enqueues `Store` messages to them. The oneshot
     /// indicates whether the operation was dispatched (`true`).
-    Put {
-        key: Key,
-        value: Value,
-        rx: oneshot::Sender<bool>,
-    },
+    Put { key: Key, value: Value },
     /// Initiate bootstrap by sending `FindNode(self)` to the given seed
     /// addresses. Responses are handled by the event loop to populate the
     /// routing table and drive a self-lookup toward convergence.

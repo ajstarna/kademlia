@@ -78,11 +78,10 @@ impl KademliaDHT {
 
     // Note: choose explicitly between start_client or start_peer.
 
-    /// Put a key,value into the dht. Returns a bool whether it succeeded or not,
-    pub async fn put(&self, key: Key, value: Value) -> anyhow::Result<bool> {
-        let (tx, rx) = oneshot::channel::<bool>();
-        self.tx.send(Command::Put { key, value, rx: tx }).await?;
-        Ok(rx.await?)
+    /// Put a key,value into the DHT. Fire-and-forget best-effort replication.
+    pub async fn put(&self, key: Key, value: Value) -> anyhow::Result<()> {
+        self.tx.send(Command::Put { key, value }).await?;
+        Ok(())
     }
 
     pub async fn get(&self, key: Key) -> anyhow::Result<Option<Value>> {

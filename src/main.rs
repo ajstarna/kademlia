@@ -174,12 +174,8 @@ async fn main() -> anyhow::Result<()> {
                 Some(hex) => parse_node_id_hex(&hex)?,
                 None => NodeID::from_hashed(&value_bytes),
             };
-            let ok = dht.put(key, value_bytes.clone()).await?;
-            println!(
-                "PUT {}: {} bytes",
-                if ok { "succeeded" } else { "failed" },
-                value_bytes.len()
-            );
+            dht.put(key, value_bytes.clone()).await?;
+            println!("PUT enqueued: {} bytes", value_bytes.len());
             println!("key(hex)={}", node_id_to_hex(key));
         }
     }

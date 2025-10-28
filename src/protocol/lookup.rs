@@ -164,5 +164,4 @@ pub(super) struct PendingLookup {
     pub(super) lookup: Lookup,
     pub(super) deadline: Instant,
     pub(super) put_value: Option<Value>,
-    pub(super) put_rx: Option<oneshot::Sender<bool>>,
 }

@@ -48,9 +48,8 @@ async fn end_to_end_put_get() -> anyhow::Result<()> {
     let value: Value = b"integration-value".to_vec();
 
     eprintln!("About to put in the dht");
-    // Put should finish and return true
-    let ok = dht.put(key, value.clone()).await?;
-    assert!(ok, "put returns true on success");
+    // Put should complete (fire-and-forget, no ack)
+    dht.put(key, value.clone()).await?;
 
     // Give time for STORE messages to reach seeds
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -117,7 +116,7 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
 
     // Use a real DHT handle for the client behavior
     let client_dht = KademliaDHT::start_client("127.0.0.1:0", seed_addrs.clone()).await?;
-    let client_info = client_dht.node_info();
+    let client_info = client_dht.node_info;
     let _ = client_dht.put(key, value.clone()).await?;
 
     // Compute the expected k closest nodes by XOR distance to key

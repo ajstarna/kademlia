@@ -26,6 +26,7 @@ pub enum NodeRole {
 }
 
 // each message type includes the NodeID of the sender
+// is_client indicates that the sender is not a full peer and should not be added to our routing table
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 enum Message {
@@ -259,16 +260,16 @@ impl ProtocolManager {
                 // Get corresponds to a Value lookup
                 self.start_lookup(key, LookupKind::Value, rx)
             }
-            Command::Put { key, value, rx } => {
+            Command::Put { key, value } => {
                 // Put: perform a Node lookup to find k closest nodes, then send Store to them
-                self.start_lookup_with_put(key, value, rx)
+                self.start_lookup_with_put(key, value)
             }
             Command::Bootstrap { addrs } => {
                 let my_id = self.node.my_info.node_id;
                 // Initialize a pending self-lookup with empty initial candidates
                 let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
                 let mut effs =
-                    self.init_lookup(my_id, LookupKind::Node, dummy_tx, Vec::new(), None, None);
+                    self.init_lookup(my_id, LookupKind::Node, dummy_tx, Vec::new(), None);
 
                 // Send initial FindNode(self) to the seed addresses
                 let query = Message::FindNode {
@@ -301,7 +302,6 @@ impl ProtocolManager {
         rx: oneshot::Sender<Option<Value>>,
         initial: Vec<NodeInfo>,
         put_value: Option<Value>,
-        put_rx: Option<oneshot::Sender<bool>>,
     ) -> Vec<Effect> {
         let mut lookup = Lookup::new(
             self.k,
@@ -323,7 +323,6 @@ impl ProtocolManager {
                 lookup,
                 deadline,
                 put_value,
-                put_rx,
             },
         );
 
@@ -337,14 +336,13 @@ impl ProtocolManager {
         rx: oneshot::Sender<Option<Value>>,
     ) -> Vec<Effect> {
         let initial = self.node.routing_table.k_closest(key);
-        self.init_lookup(key, kind, rx, initial, None, None)
+        self.init_lookup(key, kind, rx, initial, None)
     }
 
     fn start_lookup_with_put(
         &mut self,
         key: NodeID,
         value: Value,
-        put_rx: oneshot::Sender<bool>,
     ) -> Vec<Effect> {
         // We need a Lookup to drive the search for k closest nodes to the key.
         // The Lookup requires a oneshot<Option<Value>> even though Put doesn't use it.
@@ -357,7 +355,6 @@ impl ProtocolManager {
             dummy_tx,
             initial,
             Some(value),
-            Some(put_rx),
         )
     }
 
@@ -465,15 +462,14 @@ impl ProtocolManager {
                     effects.extend(lookup_effects);
 
                     if pending_lookup.lookup.is_finished() {
-                        // If this lookup was initiated by a Put, we can already enqueue Store effects
-                        // (we'll finalize and fire the Put ack after removing the lookup below).
+                        // If this lookup was initiated by a Put, we send the Store messages now
                         if let Some(value) = pending_lookup.put_value.as_ref() {
                             let nodes_to_store = pending_lookup.lookup.short_list.clone();
                             for n in nodes_to_store.iter().cloned() {
                                 let store = Message::Store {
                                     node_id: self.node.my_info.node_id,
                                     key: target,
-                                    value: value.clone(),
+                                     value: value.clone(),
                                     is_client: i_am_client,
                                 };
                                 let bytes = rmp_serde::to_vec(&store)?;
@@ -483,6 +479,8 @@ impl ProtocolManager {
                                 });
                             }
                             if !i_am_client {
+				// check if we are closer than the furthest node that stored this value.
+				// if so, then we should also store the value (it is ok if k+1 nodes store)
                                 let my_dist = self.node.my_info.node_id.distance(&target);
                                 let max_peer_dist = nodes_to_store
                                     .iter()
@@ -500,36 +498,9 @@ impl ProtocolManager {
                 }
                 if remove_lookup {
                     if let Some(mut finished) = self.pending_lookups.remove(&target) {
-                        // If this was a Put-initiated Node lookup, dispatch Store messages to shortlist
-                        if let Some(value) = finished.put_value.take() {
-                            let nodes_to_store = finished.lookup.short_list.clone();
-                            for n in nodes_to_store.iter().cloned() {
-                                let store = Message::Store {
-                                    node_id: self.node.my_info.node_id,
-                                    key: target,
-                                    value: value.clone(),
-                                    is_client: i_am_client,
-                                };
-                                let bytes = rmp_serde::to_vec(&store)?;
-                                effects.push(Effect::Send {
-                                    addr: SocketAddr::new(n.ip_address, n.udp_port),
-                                    bytes,
-                                });
-                            }
-                            if !i_am_client {
-                                let my_dist = self.node.my_info.node_id.distance(&target);
-                                let max_peer_dist = nodes_to_store
-                                    .iter()
-                                    .map(|n| n.node_id.distance(&target))
-                                    .max();
-                                if max_peer_dist.map_or(true, |d| my_dist <= d) {
-                                    self.node.store(target, value.clone());
-                                }
-                            }
-                            if let Some(tx) = finished.put_rx.take() {
-                                let _ = tx.send(true);
-                            }
-                        }
+                        // We've already enqueued any Store effects above if this was a Put.
+                        // Finalize cleanup: drop any remaining put_value and notify waiters.
+                        let _ = finished.put_value.take();
 
                         // Signal completion to any lookup waiters (None when no value found)
                         let _ = finished.lookup.rx.send(None);
@@ -1280,12 +1251,10 @@ mod test {
         insert(p2);
 
         // Start a Node lookup towards `target` via Command::Put (performs node lookup under the hood)
-        let (put_tx, _put_rx) = tokio::sync::oneshot::channel::<bool>();
         let effects = pm
             .handle_command(Command::Put {
                 key: target,
                 value: b"x".to_vec(),
-                rx: put_tx,
             })
             .await
             .unwrap();
@@ -1416,12 +1385,10 @@ mod test {
         // Act: issue a Put command
         let key: Key = target;
         let value: Value = b"hello-put".to_vec();
-        let (put_tx, put_rx) = tokio::sync::oneshot::channel::<bool>();
         let effects = pm
             .handle_command(Command::Put {
                 key,
                 value: value.clone(),
-                rx: put_tx,
             })
             .await
             .unwrap();
@@ -1510,8 +1477,6 @@ mod test {
             "should STORE to both final peers"
         );
 
-        // And the Put ack should be true
-        let ok = put_rx.await.expect("put oneshot should complete");
-        assert!(ok);
+        // Put is fire-and-forget; no ack to await
     }
 }
