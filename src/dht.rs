@@ -78,7 +78,17 @@ impl KademliaDHT {
 
     /// Put a key,value into the DHT. Fire-and-forget best-effort replication.
     pub async fn put(&self, key: Key, value: Value) -> anyhow::Result<()> {
-        self.tx.send(Command::Put { key, value }).await?;
+        let (tx_done, rx_done) = oneshot::channel::<()>();
+        self.tx
+            .send(Command::Put {
+                key,
+                value,
+                tx_done,
+            })
+            .await?;
+        // Wait until the protocol has converged on k closest and scheduled STORE messages.
+        // This does not guarantee they have been delivered, only dispatched.
+        let _ = rx_done.await;
         Ok(())
     }
 
@@ -86,14 +96,18 @@ impl KademliaDHT {
     /// Possibly None if no nodes have the value for this key.
     pub async fn get(&self, key: Key) -> anyhow::Result<Option<Value>> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Command::Get { key, rx: tx }).await?;
+        self.tx
+            .send(Command::Get { key, tx_value: tx })
+            .await?;
         Ok(rx.await?)
     }
 
     /// Test/debug helper: query whether this node currently has a value for `key`.
     pub async fn debug_has_value(&self, key: Key) -> anyhow::Result<bool> {
         let (tx, rx) = oneshot::channel::<bool>();
-        self.tx.send(Command::DebugHasValue { key, rx: tx }).await?;
+        self.tx
+            .send(Command::DebugHasValue { key, tx_has: tx })
+            .await?;
         Ok(rx.await?)
     }
 }

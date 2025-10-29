@@ -257,23 +257,28 @@ impl ProtocolManager {
 
     async fn handle_command(&mut self, command: Command) -> anyhow::Result<Vec<Effect>> {
         let effects = match command {
-            Command::Get { key, rx } => {
+            Command::Get { key, tx_value } => {
                 // Get corresponds to a Value lookup
                 info!(?key, "Get Command");
-                self.start_lookup(key, LookupKind::Value, rx)
+                self.start_lookup(key, LookupKind::Value, tx_value)
             }
-            Command::Put { key, value } => {
+            Command::Put { key, value, tx_done } => {
                 // Put: perform a Node lookup to find k closest nodes, then send Store to them
                 info!(key=?key, value=?value, "Put Command");
-                self.start_lookup_with_put(key, value)
+                self.start_lookup_with_put(key, value, tx_done)
             }
             Command::Bootstrap { addrs } => {
                 info!(addrs=?addrs, "Bootstrap Command");
                 let my_id = self.node.my_info.node_id;
                 // Initialize a pending self-lookup with empty initial candidates
-                let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
-                let mut effs =
-                    self.init_lookup(my_id, LookupKind::Node, dummy_tx, Vec::new(), None);
+                let mut effs = self.init_lookup(
+                    my_id,
+                    LookupKind::Node,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                );
 
                 // Send initial FindNode(self) to the seed addresses
                 let query = Message::FindNode {
@@ -290,9 +295,9 @@ impl ProtocolManager {
                 }
                 effs
             }
-            Command::DebugHasValue { key, rx } => {
+            Command::DebugHasValue { key, tx_has } => {
                 let has = self.node.get(&key).is_some();
-                let _ = rx.send(has);
+                let _ = tx_has.send(has);
                 Vec::new()
             }
         };
@@ -303,9 +308,10 @@ impl ProtocolManager {
         &mut self,
         key: NodeID,
         kind: LookupKind,
-        rx: oneshot::Sender<Option<Value>>,
+        tx_value: Option<oneshot::Sender<Option<Value>>>,
         initial: Vec<NodeInfo>,
         put_value: Option<Value>,
+        tx_done: Option<oneshot::Sender<()>>,
     ) -> Vec<Effect> {
         let mut lookup = Lookup::new(
             self.k,
@@ -314,7 +320,6 @@ impl ProtocolManager {
             self.is_client(),
             key,
             kind,
-            rx,
             initial,
         );
 
@@ -327,6 +332,8 @@ impl ProtocolManager {
                 lookup,
                 deadline,
                 put_value,
+                tx_done,
+                tx_value,
             },
         );
 
@@ -337,28 +344,26 @@ impl ProtocolManager {
         &mut self,
         key: NodeID,
         kind: LookupKind,
-        rx: oneshot::Sender<Option<Value>>,
+        tx_value: oneshot::Sender<Option<Value>>,
     ) -> Vec<Effect> {
         let initial = self.node.routing_table.k_closest(key);
-        self.init_lookup(key, kind, rx, initial, None)
+        self.init_lookup(key, kind, Some(tx_value), initial, None, None)
     }
 
     fn start_lookup_with_put(
         &mut self,
         key: NodeID,
         value: Value,
+        tx_done: oneshot::Sender<()>,
     ) -> Vec<Effect> {
-        // We need a Lookup to drive the search for k closest nodes to the key.
-        // The Lookup requires a oneshot<Option<Value>> even though Put doesn't use it.
-        let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
-
         let initial = self.node.routing_table.k_closest(key);
         self.init_lookup(
             key,
             LookupKind::Node,
-            dummy_tx,
+            None,
             initial,
             Some(value),
+            Some(tx_done),
         )
     }
 
@@ -509,9 +514,13 @@ impl ProtocolManager {
                         // We've already enqueued any Store effects above if this was a Put.
                         // Finalize cleanup: drop any remaining put_value and notify waiters.
                         let _ = finished.put_value.take();
-
-                        // Signal completion to any lookup waiters (None when no value found)
-                        let _ = finished.lookup.rx.send(None);
+                        if let Some(done) = finished.tx_done.take() {
+                            let _ = done.send(());
+                        }
+                        // Signal completion to any value-lookup waiters (None when no value found)
+                        if let Some(tx) = finished.tx_value.take() {
+                            let _ = tx.send(None);
+                        }
                     }
                 }
                 (node_id, is_client)
@@ -560,12 +569,14 @@ impl ProtocolManager {
                 is_client,
             } => {
                 debug!(key=?key, value=?value, "Received ValueFound");
-                if let Some(pending_lookup) = self.pending_lookups.remove(&key) {
+                if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
                     info!(?key, ?node_id, "Lookup completed with value");
 
                     // Send the found value back to the user
-                    let _ = pending_lookup.lookup.rx.send(Some(value.clone()));
+                    if let Some(tx) = pending_lookup.tx_value.take() {
+                        let _ = tx.send(Some(value.clone()));
+                    }
                 }
                 // Optionally Cache the value in our own local storage
                 if !self.is_client() {
@@ -921,7 +932,7 @@ mod test {
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
         let effects = pm
-            .handle_command(Command::Get { key, rx: tx })
+            .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
@@ -973,7 +984,7 @@ mod test {
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
         let _ = pm
-            .handle_command(Command::Get { key, rx: tx })
+            .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
@@ -1030,7 +1041,7 @@ mod test {
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
         let effects = pm
-            .handle_command(Command::Get { key, rx: tx })
+            .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
@@ -1093,7 +1104,7 @@ mod test {
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
         let _ = pm
-            .handle_command(Command::Get { key, rx: tx })
+            .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
@@ -1154,7 +1165,7 @@ mod test {
         // Start the lookup (Value) via Command::Get
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
         let effects = pm
-            .handle_command(Command::Get { key, rx: tx })
+            .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
@@ -1260,10 +1271,12 @@ mod test {
         insert(p2);
 
         // Start a Node lookup towards `target` via Command::Put (performs node lookup under the hood)
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<()>();
         let effects = pm
             .handle_command(Command::Put {
                 key: target,
                 value: b"x".to_vec(),
+                tx_done: ack_tx,
             })
             .await
             .unwrap();
@@ -1394,10 +1407,12 @@ mod test {
         // Act: issue a Put command
         let key: Key = target;
         let value: Value = b"hello-put".to_vec();
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<()>();
         let effects = pm
             .handle_command(Command::Put {
                 key,
                 value: value.clone(),
+                tx_done: ack_tx,
             })
             .await
             .unwrap();

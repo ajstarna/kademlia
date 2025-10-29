@@ -30,7 +30,6 @@ pub(super) struct Lookup {
     // keep the target as a NodeID, even though sometimes it is a key
     pub(super) target: NodeID,
     pub(super) kind: LookupKind,
-    pub(super) rx: oneshot::Sender<Option<Value>>, // result channel for library user
     pub(super) short_list: Vec<NodeInfo>,
     pub(super) already_queried: HashSet<NodeID>,
     pub(super) in_flight: HashMap<NodeID, Instant>,
@@ -44,7 +43,6 @@ impl Lookup {
         is_client: bool,
         target: NodeID,
         kind: LookupKind,
-        rx: oneshot::Sender<Option<Value>>,
         initial_candidates: Vec<NodeInfo>,
     ) -> Self {
         let mut short_list = initial_candidates;
@@ -59,7 +57,6 @@ impl Lookup {
             is_client,
             target,
             kind,
-            rx,
             short_list,
             already_queried: HashSet::new(),
             in_flight: HashMap::new(),
@@ -164,4 +161,6 @@ pub(super) struct PendingLookup {
     pub(super) lookup: Lookup,
     pub(super) deadline: Instant,
     pub(super) put_value: Option<Value>,
+    pub(super) tx_done: Option<oneshot::Sender<()>>,
+    pub(super) tx_value: Option<oneshot::Sender<Option<Value>>>,
 }
