@@ -333,7 +333,7 @@ impl RoutingTable {
             InsertResult::Full { lru } => {
                 if bucket.covers(my_id) {
                     // split the bucket
-                    println!("lets split");
+                    tracing::debug!("Splitting full bucket that covers self");
                     let (zero, one, bit_index) = split_bucket(bucket, k);
                     let new_tree = BucketTree::Branch {
                         bit_index,

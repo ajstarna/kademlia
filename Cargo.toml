@@ -12,6 +12,8 @@ serde = { version = "1.0.219", features = ["derive"] }
 sha1 = "0.10.6"
 tokio = { version = "1.47.0", features = ["full"] }
 clap = { version = "4.5.17", features = ["derive"] }
+tracing = { version = "0.1", features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 tokio = { version = "1.47.0", features = ["full", "test-util"] }

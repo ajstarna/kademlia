@@ -40,8 +40,9 @@ start_seed() {
   local log="${LOG_DIR}/peer-${port}.log"
   echo "Starting seed peer on 127.0.0.1:${port} (logs: ${log})"
   # Run as a seed (no bootstrap)
-  ( RUST_LOG=info "${BIN}" peer --bind 127.0.0.1:"${port}" --k "${K}" --alpha "${ALPHA}" \
-      >>"${log}" 2>&1 ) &
+  # Default to verbose logs; allow override via outer RUST_LOG
+  ( RUST_LOG="${RUST_LOG:-kademlia=debug}" "${BIN}" peer --bind 127.0.0.1:"${port}" --k "${K}" --alpha "${ALPHA}" \
+      >"${log}" 2>&1 ) &
   PEER_PIDS+=($!)
   SEED_ADDRS+=("127.0.0.1:${port}")
 }
@@ -54,8 +55,9 @@ start_join_peer() {
   for a in "${SEED_ADDRS[@]}"; do
     bootstrap_args+=(--bootstrap "$a")
   done
-  ( RUST_LOG=info "${BIN}" peer --bind 127.0.0.1:0 "${bootstrap_args[@]}" --k "${K}" --alpha "${ALPHA}" \
-      >>"${log}" 2>&1 ) &
+  # Default to verbose logs; allow override via outer RUST_LOG
+  ( RUST_LOG="${RUST_LOG:-kademlia=debug}" "${BIN}" peer --bind 127.0.0.1:0 "${bootstrap_args[@]}" --k "${K}" --alpha "${ALPHA}" \
+      >"${log}" 2>&1 ) &
   PEER_PIDS+=($!)
 }
 

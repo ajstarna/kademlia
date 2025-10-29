@@ -12,6 +12,7 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 //use std::time::Instant;
+use tracing::{debug, error, info, trace, warn};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 mod command;
@@ -258,13 +259,16 @@ impl ProtocolManager {
         let effects = match command {
             Command::Get { key, rx } => {
                 // Get corresponds to a Value lookup
+                info!(?key, "Get Command");
                 self.start_lookup(key, LookupKind::Value, rx)
             }
             Command::Put { key, value } => {
                 // Put: perform a Node lookup to find k closest nodes, then send Store to them
+                info!(key=?key, value=?value, "Put Command");
                 self.start_lookup_with_put(key, value)
             }
             Command::Bootstrap { addrs } => {
+                info!(addrs=?addrs, "Bootstrap Command");
                 let my_id = self.node.my_info.node_id;
                 // Initialize a pending self-lookup with empty initial candidates
                 let (dummy_tx, _dummy_rx) = oneshot::channel::<Option<Value>>();
@@ -370,7 +374,7 @@ impl ProtocolManager {
                 probe_id,
                 is_client,
             } => {
-                println!("Received Ping from {node_id:?}");
+                debug!(?node_id, "Received Ping");
                 let pong = Message::Pong {
                     node_id: self.node.my_info.node_id,
                     probe_id,
@@ -389,7 +393,7 @@ impl ProtocolManager {
                 probe_id,
                 is_client,
             } => {
-                println!("Received Pong from {node_id:?}");
+                debug!(?node_id, "Received Pong");
                 // Maybe mark the node as alive or update routing table
                 if let Some(pending) = self.pending_probes.remove(&probe_id) {
                     self.node
@@ -397,7 +401,7 @@ impl ProtocolManager {
                         .resolve_probe(pending.peer, /*alive =*/ true);
                 } else {
                     // TODO: is there more to think about here?
-                    println!("A Pong was received without an associated probe_id. Interesting. {node_id:?}");
+                    warn!(?node_id, probe_id=?probe_id, "Pong received without matching probe");
                 }
                 (node_id, is_client)
             }
@@ -408,7 +412,7 @@ impl ProtocolManager {
                 value,
                 is_client,
             } => {
-                println!("Store request: key={key:?}, value={value:?}");
+                debug!(?key, value_len=?value.len(), "Store request");
                 if !self.is_client() {
                     self.node.store(key, value);
                 }
@@ -420,7 +424,7 @@ impl ProtocolManager {
                 target,
                 is_client,
             } => {
-                println!("FindNode request: looking for {target:?}");
+                debug!(?target, "FindNode request");
                 // Find closest nodes to the given ID in your routing table
                 let closest = self.node.routing_table.k_closest(target);
                 let nodes = Message::Nodes {
@@ -443,6 +447,7 @@ impl ProtocolManager {
                 nodes,
                 is_client,
             } => {
+                debug!(?target, "Received Nodes");
                 // observe all the new nodes we just learned about
                 for n in &nodes {
                     if let Some(eff) =
@@ -461,7 +466,10 @@ impl ProtocolManager {
                     let lookup_effects = pending_lookup.lookup.top_up_alpha_requests();
                     effects.extend(lookup_effects);
 
+		    debug!(in_flight=?pending_lookup.lookup.in_flight, "In Flight");
+
                     if pending_lookup.lookup.is_finished() {
+			debug!("Lookup has finished");
                         // If this lookup was initiated by a Put, we send the Store messages now
                         if let Some(value) = pending_lookup.put_value.as_ref() {
                             let nodes_to_store = pending_lookup.lookup.short_list.clone();
@@ -514,7 +522,7 @@ impl ProtocolManager {
                 key,
                 is_client,
             } => {
-                println!("FindValue request: key={key:?}");
+                debug!(?key, "FindValue request");
                 // Lookup the value, or return closest nodes if not found
                 if let Some(value) = self.node.get(&key) {
                     let found = Message::ValueFound {
@@ -551,9 +559,10 @@ impl ProtocolManager {
                 value,
                 is_client,
             } => {
+                debug!(key=?key, value=?value, "Received ValueFound");
                 if let Some(pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
-                    println!("Lookup for {key:?} completed with value from {node_id:?}");
+                    info!(?key, ?node_id, "Lookup completed with value");
 
                     // Send the found value back to the user
                     let _ = pending_lookup.lookup.rx.send(Some(value.clone()));
@@ -580,7 +589,7 @@ impl ProtocolManager {
         match effect {
             Effect::Send { addr, bytes } => {
                 if let Err(e) = self.socket.send_to(&bytes, addr).await {
-                    eprintln!("Failed to send to {addr}: {e}");
+                    error!(%addr, error=%e.to_string(), "Failed to send");
                 }
             }
             Effect::StartProbe {
@@ -590,7 +599,7 @@ impl ProtocolManager {
             } => {
                 let addr = SocketAddr::new(peer.ip_address, peer.udp_port);
                 if let Err(e) = self.socket.send_to(&bytes, addr).await {
-                    eprintln!("Failed to send probe to {addr}: {e}");
+                    error!(%addr, error=%e.to_string(), "Failed to send probe");
                 } else {
                     // Record the probe so we can resolve it later
                     let deadline = Instant::now() + PROBE_TIMEOUT;
@@ -642,7 +651,7 @@ impl ProtocolManager {
                     result = self.socket.recv_from(&mut buf) =>  {
                         match result {
                         Ok((len, src_addr)) => {
-                            println!("Received {len} bytes from {src_addr}");
+                            debug!(bytes=len, %src_addr, "UDP recv");
                             let msg = rmp_serde::from_slice::<Message>(&buf[..len]);
                             match msg {
                             Ok(msg) => {
@@ -654,13 +663,13 @@ impl ProtocolManager {
                     }
                             }
                             Err(e) => {
-                                eprintln!("Error receiving message: {e}");
+                                error!(error=%e.to_string(), "Error decoding message");
                                 continue;
                             }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Error receiving message: {e}");
+                            error!(error=%e.to_string(), "Error receiving message");
                             continue;
                         }
                         }

@@ -74,6 +74,15 @@ impl NodeID {
     pub fn distance(&self, other: &NodeID) -> Distance {
         Distance(self.0 ^ other.0)
     }
+
+    /// Return a short, human-friendly hex for logging, like ab12cd34…ef90a1b2
+    pub fn short_hex(&self) -> String {
+        let b = self.0.to_fixed_bytes();
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}…{:02x}{:02x}{:02x}{:02x}",
+            b[0], b[1], b[2], b[3], b[16], b[17], b[18], b[19]
+        )
+    }
 }
 
 impl BitXor for NodeID {

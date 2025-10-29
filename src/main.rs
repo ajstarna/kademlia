@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 use kademlia::dht::KademliaDHT;
 use kademlia::protocol::{Command, ProtocolManager};
 use kademlia::{Key, NodeID, Value};
+use tracing_subscriber::EnvFilter;
+use std::io::{self, IsTerminal};
 
 /// Run a Kademlia node as a seed or join via bootstrap peers.
 #[derive(Parser, Debug)]
@@ -79,7 +81,37 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse CLI first so we can choose log destination per command.
     let cli = Cli::parse();
+
+    // Initialize logging. Respect RUST_LOG, default to info.
+    // Send logs to stdout for long-lived `peer`, and to stderr for short-lived `get/put`.
+    let logs_to_stdout = matches!(cli.command, Commands::Peer { .. });
+    let base = || {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_target(false)
+            .compact()
+    };
+    let ansi = if logs_to_stdout {
+        io::stdout().is_terminal()
+    } else {
+        io::stderr().is_terminal()
+    };
+    if logs_to_stdout {
+        let _ = base()
+            .with_writer(io::stdout)
+            .with_ansi(ansi)
+            .try_init();
+    } else {
+        let _ = base()
+            .with_writer(io::stderr)
+            .with_ansi(ansi)
+            .try_init();
+    }
 
     match cli.command {
         Commands::Peer {
@@ -88,17 +120,7 @@ async fn main() -> anyhow::Result<()> {
             k,
             alpha,
         } => {
-            println!(
-                "Starting node on {} with k={} alpha={} ({} mode)",
-                bind,
-                k,
-                alpha,
-                if bootstrap.is_empty() {
-                    "seed"
-                } else {
-                    "client"
-                }
-            );
+            tracing::info!(bind=%bind, k, alpha, mode=%if bootstrap.is_empty() {"seed"} else {"client"}, "Starting node");
 
             let socket = UdpSocket::bind(bind).await?;
 
@@ -120,10 +142,7 @@ async fn main() -> anyhow::Result<()> {
                 // Initiate bootstrap
                 tx.send(Command::Bootstrap { addrs: boot_addrs }).await?;
 
-                println!(
-                    "Bootstrapping to {} peer(s). Press Ctrl-C to exit.",
-                    bootstrap.len()
-                );
+                tracing::info!(peers=%bootstrap.len(), "Bootstrapping; press Ctrl-C to exit");
 
                 // Stay alive until Ctrl-C
                 tokio::signal::ctrl_c().await?;
@@ -131,13 +150,19 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::Get { bind, bootstrap, key } => {
-            println!("Starting ephemeral get on {}...", bind);
+            tracing::info!(bind=%bind, "Starting ephemeral get");
             let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone()).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
             let key = parse_node_id_hex(&key)?;
             match dht.get(key).await? {
                 Some(value) => {
+                    tracing::info!(bytes=%value.len(), "GET OK");
+                    tracing::info!("value(hex)={}", to_hex(&value));
+                    if let Ok(s) = String::from_utf8(value.clone()) {
+                        tracing::info!("value(utf8)={}", s);
+                    }
+                    // User-facing stdout for scripts/tools
                     println!("OK: {} bytes", value.len());
                     println!("value(hex)={}", to_hex(&value));
                     if let Ok(s) = String::from_utf8(value.clone()) {
@@ -145,13 +170,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 None => {
+                    tracing::info!("NOT FOUND");
+                    // User-facing stdout for scripts/tools
                     println!("NOT FOUND");
                 }
             }
         }
 
         Commands::Put { bind, bootstrap, data, value, key } => {
-            println!("Starting ephemeral put on {}...", bind);
+            tracing::info!(bind=%bind, "Starting ephemeral put");
             let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone()).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
@@ -166,7 +193,8 @@ async fn main() -> anyhow::Result<()> {
                 None => NodeID::from_hashed(&value_bytes),
             };
             dht.put(key, value_bytes.clone()).await?;
-            println!("PUT enqueued: {} bytes", value_bytes.len());
+            tracing::info!(bytes=%value_bytes.len(), key_hex=%node_id_to_hex(key), "PUT enqueued");
+            // User-facing stdout for scripts/tools: print the key as the last line
             println!("key(hex)={}", node_id_to_hex(key));
         }
     }
