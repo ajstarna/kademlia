@@ -133,9 +133,7 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
         for (tx, info) in all_senders.iter().cloned().zip(all_infos.iter().cloned()) {
             let (qtx, qrx) = tokio::sync::oneshot::channel::<bool>();
             // Ignore errors if a node happened to shut down (shouldn't in this test)
-            let _ = tx
-                .send(Command::DebugHasValue { key, tx_has: qtx })
-                .await;
+            let _ = tx.send(Command::DebugHasValue { key, tx_has: qtx }).await;
             if let Ok(true) = qrx.await {
                 has_set.insert(info.node_id);
             }

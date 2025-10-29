@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use kademlia::dht::KademliaDHT;
 use kademlia::protocol::{Command, ProtocolManager};
 use kademlia::{Key, NodeID, Value};
-use tracing_subscriber::EnvFilter;
 use std::io::{self, IsTerminal};
+use tracing_subscriber::EnvFilter;
 
 /// Run a Kademlia node as a seed or join via bootstrap peers.
 #[derive(Parser, Debug)]
@@ -91,7 +91,6 @@ enum Commands {
         /// Optional 40-hex key (optionally 0x-prefixed); when omitted, SHA1(value)
         #[arg(long = "key")]
         key: Option<String>,
-
     },
 }
 
@@ -106,8 +105,7 @@ async fn main() -> anyhow::Result<()> {
     let base = || {
         tracing_subscriber::fmt()
             .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("info")),
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )
             .with_target(false)
             .compact()
@@ -118,15 +116,9 @@ async fn main() -> anyhow::Result<()> {
         io::stderr().is_terminal()
     };
     if logs_to_stdout {
-        let _ = base()
-            .with_writer(io::stdout)
-            .with_ansi(ansi)
-            .try_init();
+        let _ = base().with_writer(io::stdout).with_ansi(ansi).try_init();
     } else {
-        let _ = base()
-            .with_writer(io::stderr)
-            .with_ansi(ansi)
-            .try_init();
+        let _ = base().with_writer(io::stderr).with_ansi(ansi).try_init();
     }
 
     match cli.command {
@@ -165,9 +157,16 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Get { bind, bootstrap, k, alpha, key } => {
+        Commands::Get {
+            bind,
+            bootstrap,
+            k,
+            alpha,
+            key,
+        } => {
             tracing::info!(bind=%bind, "Starting ephemeral get");
-            let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone(), k, alpha).await?;
+            let dht =
+                KademliaDHT::start_client(&bind.to_string(), bootstrap.clone(), k, alpha).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
             let key = parse_node_id_hex(&key)?;
@@ -193,9 +192,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Put { bind, bootstrap, k, alpha, data, value, key } => {
+        Commands::Put {
+            bind,
+            bootstrap,
+            k,
+            alpha,
+            data,
+            value,
+            key,
+        } => {
             tracing::info!(bind=%bind, "Starting ephemeral put");
-            let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone(), k, alpha).await?;
+            let dht =
+                KademliaDHT::start_client(&bind.to_string(), bootstrap.clone(), k, alpha).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
             let val_str = match (value, data) {

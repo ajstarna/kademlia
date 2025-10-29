@@ -30,7 +30,11 @@ pub enum Command {
     /// Internally performs a node lookup to find the k closest peers and
     /// enqueues `Store` messages to them. The `ack` oneshot completes when the
     /// lookup converges and STORE messages have been scheduled (fire-and-forget).
-    Put { key: Key, value: Value, tx_done: oneshot::Sender<()> },
+    Put {
+        key: Key,
+        value: Value,
+        tx_done: oneshot::Sender<()>,
+    },
     /// Initiate bootstrap by sending `FindNode(self)` to the given seed
     /// addresses. Responses are handled by the event loop to populate the
     /// routing table and drive a self-lookup toward convergence.
@@ -38,5 +42,8 @@ pub enum Command {
 
     /// Test/debug helper: query whether this node currently has a value for `key`.
     /// Replies `true` if present in local storage.
-    DebugHasValue { key: Key, tx_has: oneshot::Sender<bool> },
+    DebugHasValue {
+        key: Key,
+        tx_has: oneshot::Sender<bool>,
+    },
 }

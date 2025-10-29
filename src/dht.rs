@@ -96,9 +96,7 @@ impl KademliaDHT {
     /// Possibly None if no nodes have the value for this key.
     pub async fn get(&self, key: Key) -> anyhow::Result<Option<Value>> {
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Command::Get { key, tx_value: tx })
-            .await?;
+        self.tx.send(Command::Get { key, tx_value: tx }).await?;
         Ok(rx.await?)
     }
 

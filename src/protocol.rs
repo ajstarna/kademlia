@@ -262,7 +262,11 @@ impl ProtocolManager {
                 info!(?key, "Get Command");
                 self.start_lookup(key, LookupKind::Value, tx_value)
             }
-            Command::Put { key, value, tx_done } => {
+            Command::Put {
+                key,
+                value,
+                tx_done,
+            } => {
                 // Put: perform a Node lookup to find k closest nodes, then send Store to them
                 info!(key=?key, value=?value, "Put Command");
                 self.start_lookup_with_put(key, value, tx_done)
@@ -271,14 +275,8 @@ impl ProtocolManager {
                 info!(addrs=?addrs, "Bootstrap Command");
                 let my_id = self.node.my_info.node_id;
                 // Initialize a pending self-lookup with empty initial candidates
-                let mut effs = self.init_lookup(
-                    my_id,
-                    LookupKind::Node,
-                    None,
-                    Vec::new(),
-                    None,
-                    None,
-                );
+                let mut effs =
+                    self.init_lookup(my_id, LookupKind::Node, None, Vec::new(), None, None);
 
                 // Send initial FindNode(self) to the seed addresses
                 let query = Message::FindNode {
@@ -471,19 +469,19 @@ impl ProtocolManager {
                     let lookup_effects = pending_lookup.lookup.top_up_alpha_requests();
                     effects.extend(lookup_effects);
 
-		    debug!(in_flight=?pending_lookup.lookup.in_flight, "In Flight");
+                    debug!(in_flight=?pending_lookup.lookup.in_flight, "In Flight");
 
                     if pending_lookup.lookup.is_finished() {
-			info!(?target, "Lookup completed with nodes");
+                        info!(?target, "Lookup completed with nodes");
                         // If this lookup was initiated by a Put, we send the Store messages now
                         if let Some(value) = pending_lookup.put_value.as_ref() {
                             let nodes_to_store = pending_lookup.lookup.short_list.clone();
-			    info!(?nodes_to_store, "Nodes to store.");
+                            info!(?nodes_to_store, "Nodes to store.");
                             for n in nodes_to_store.iter().cloned() {
                                 let store = Message::Store {
                                     node_id: self.node.my_info.node_id,
                                     key: target,
-                                     value: value.clone(),
+                                    value: value.clone(),
                                     is_client: i_am_client,
                                 };
                                 let bytes = rmp_serde::to_vec(&store)?;
@@ -493,8 +491,8 @@ impl ProtocolManager {
                                 });
                             }
                             if !i_am_client {
-				// check if we are closer than the furthest node that stored this value.
-				// if so, then we should also store the value (it is ok if k+1 nodes store)
+                                // check if we are closer than the furthest node that stored this value.
+                                // if so, then we should also store the value (it is ok if k+1 nodes store)
                                 let my_dist = self.node.my_info.node_id.distance(&target);
                                 let max_peer_dist = nodes_to_store
                                     .iter()
