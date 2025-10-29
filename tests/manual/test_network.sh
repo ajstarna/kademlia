@@ -11,8 +11,8 @@ set -euo pipefail
 # Config (override via env vars when calling the script)
 : "${NUM_SEEDS:=2}"
 : "${SEED_BASE_PORT:=8080}"
-: "${NUM_JOIN_PEERS:=2}"
-: "${K:=20}"
+: "${NUM_JOIN_PEERS:=100}"
+: "${K:=4}"
 : "${ALPHA:=3}"
 : "${VALUE:=hello-from-manual-script}"
 
@@ -66,7 +66,7 @@ start_join_peer() {
 }
 
 cleanup() {
-  echo "\nStopping peers ..."
+  printf '\nStopping peers ...'
   if [ ${#PEER_PIDS[@]} -gt 0 ]; then
     kill "${PEER_PIDS[@]}" 2>/dev/null || true
     wait "${PEER_PIDS[@]}" 2>/dev/null || true
@@ -96,7 +96,7 @@ for a in "${SEED_ADDRS[@]}"; do
   bootstrap_flags+=(--bootstrap "$a")
 done
 
-echo "\nPUT via client ..."
+printf '\nPUT via client ...\n'
 PUT_OUT=$("${BIN}" put --bind 127.0.0.1:0 "${bootstrap_flags[@]}" --k "${K}" --alpha "${ALPHA}" --value "${VALUE}" || true)
 echo "${PUT_OUT}" | sed 's/^/  /'
 
@@ -107,22 +107,14 @@ if [[ -z "${KEY_HEX}" ]]; then
   exit 1
 fi
 
-echo "\nGET via client for key=${KEY_HEX} (retrying) ..."
-FOUND=0
-for attempt in {1..10}; do
-  GET_OUT=$("${BIN}" get --bind 127.0.0.1:0 "${bootstrap_flags[@]}" --k "${K}" --alpha "${ALPHA}" "${KEY_HEX}" || true)
-  echo "Attempt ${attempt}:"; echo "${GET_OUT}" | sed 's/^/  /'
-  if echo "${GET_OUT}" | grep -q "^OK:"; then
-    FOUND=1
-    break
-  fi
-  sleep 0.5
-done
-if [[ "${FOUND}" -ne 1 ]]; then
-  echo "\nValue not found after retries. Check peer logs in ${LOG_DIR}." >&2
+printf '\nGET via client for key=%s ...\n' "${KEY_HEX}"
+GET_OUT=$("${BIN}" get --bind 127.0.0.1:0 "${bootstrap_flags[@]}" --k "${K}" --alpha "${ALPHA}" "${KEY_HEX}" || true)
+echo "${GET_OUT}" | sed 's/^/  /'
+if ! echo "${GET_OUT}" | grep -q "^OK:"; then
+  echo "Get did not return OK. Check peer logs in ${LOG_DIR}." >&2
+  exit 1
 fi
 
-echo "\nDone. Logs in ${LOG_DIR}. Peers will be terminated now."
+printf '\nDone. Logs in %s. Peers will be terminated now.\n' "${LOG_DIR}"
 
 popd >/dev/null
-

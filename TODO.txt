@@ -1,6 +1,4 @@
-- debug run_network.sh
-
-- add logging to help see whats happening.
+- improve/more logs?
 
 - bucket refresh
 
