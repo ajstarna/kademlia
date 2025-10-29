@@ -21,6 +21,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 LOG_DIR="${REPO_ROOT}/tests/manual/logs"
 mkdir -p "${LOG_DIR}"
+# Ensure fresh logs each run
+rm -f "${LOG_DIR}"/*.log 2>/dev/null || true
 
 pushd "${REPO_ROOT}" >/dev/null
 
@@ -43,7 +45,7 @@ start_seed() {
   (
     RUST_LOG="${RUST_LOG:-kademlia=debug}" \
     "${BIN}" peer --bind 127.0.0.1:"${port}" --k "${K}" --alpha "${ALPHA}" \
-      >>"${log}" 2>&1
+      >"${log}" 2>&1
   ) &
   PEER_PIDS+=($!)
   SEED_ADDRS+=("127.0.0.1:${port}")
@@ -60,7 +62,7 @@ start_join_peer() {
   (
     RUST_LOG="${RUST_LOG:-kademlia=debug}" \
     "${BIN}" peer --bind 127.0.0.1:0 "${bootstrap_args[@]}" --k "${K}" --alpha "${ALPHA}" \
-      >>"${log}" 2>&1
+      >"${log}" 2>&1
   ) &
   PEER_PIDS+=($!)
 }
