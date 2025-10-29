@@ -20,12 +20,12 @@ impl KademliaDHT {
     pub async fn start_client(
         bind_addr: &str,
         bootstrap_addrs: Vec<std::net::SocketAddr>,
+        k: usize,
+        alpha: usize,
     ) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel::<Command>(100);
         let socket = UdpSocket::bind(bind_addr).await?;
         let local_addr = socket.local_addr()?;
-        let k = 20;
-        let alpha = 3;
         let manager = ProtocolManager::new_client(socket, rx, k, alpha)?;
         let node_info = manager.node.my_info;
 

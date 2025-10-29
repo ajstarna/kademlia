@@ -49,6 +49,14 @@ enum Commands {
         #[arg(long = "bootstrap", value_parser = clap::value_parser!(SocketAddr))]
         bootstrap: Vec<SocketAddr>,
 
+        /// Kademlia bucket size (replication parameter)
+        #[arg(long = "k", default_value_t = 20)]
+        k: usize,
+
+        /// Kademlia parallelism (concurrency of lookups)
+        #[arg(long = "alpha", default_value_t = 3)]
+        alpha: usize,
+
         /// 40 hex chars (optionally 0x-prefixed) representing the key
         key: String,
     },
@@ -63,6 +71,14 @@ enum Commands {
         /// Bootstrap peer(s) to query (repeatable). At least one is typically required.
         #[arg(long = "bootstrap", value_parser = clap::value_parser!(SocketAddr))]
         bootstrap: Vec<SocketAddr>,
+
+        /// Kademlia bucket size (replication parameter)
+        #[arg(long = "k", default_value_t = 20)]
+        k: usize,
+
+        /// Kademlia parallelism (concurrency of lookups)
+        #[arg(long = "alpha", default_value_t = 3)]
+        alpha: usize,
 
         /// Positional value to store (raw string bytes). Required unless --value is used.
         #[arg(required_unless_present = "value")]
@@ -149,9 +165,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Get { bind, bootstrap, key } => {
+        Commands::Get { bind, bootstrap, k, alpha, key } => {
             tracing::info!(bind=%bind, "Starting ephemeral get");
-            let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone()).await?;
+            let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone(), k, alpha).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
             let key = parse_node_id_hex(&key)?;
@@ -177,9 +193,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Put { bind, bootstrap, data, value, key } => {
+        Commands::Put { bind, bootstrap, k, alpha, data, value, key } => {
             tracing::info!(bind=%bind, "Starting ephemeral put");
-            let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone()).await?;
+            let dht = KademliaDHT::start_client(&bind.to_string(), bootstrap.clone(), k, alpha).await?;
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
             let val_str = match (value, data) {

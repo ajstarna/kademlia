@@ -474,10 +474,11 @@ impl ProtocolManager {
 		    debug!(in_flight=?pending_lookup.lookup.in_flight, "In Flight");
 
                     if pending_lookup.lookup.is_finished() {
-			debug!("Lookup has finished");
+			info!(?target, "Lookup completed with nodes");
                         // If this lookup was initiated by a Put, we send the Store messages now
                         if let Some(value) = pending_lookup.put_value.as_ref() {
                             let nodes_to_store = pending_lookup.lookup.short_list.clone();
+			    info!(?nodes_to_store, "Nodes to store.");
                             for n in nodes_to_store.iter().cloned() {
                                 let store = Message::Store {
                                     node_id: self.node.my_info.node_id,

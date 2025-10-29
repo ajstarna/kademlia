@@ -48,4 +48,4 @@ Keys are 20 bytes (H160), printed/accepted as 40 hex chars.
 
 ## Demo
 
-For a quick multi‑node demo, see `tests/manual/run_network.sh`.
+For a quick multi‑node demo, see `tests/manual/test_network.sh`.

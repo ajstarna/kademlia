@@ -25,7 +25,7 @@ mkdir -p "${LOG_DIR}"
 pushd "${REPO_ROOT}" >/dev/null
 
 echo "Building binary (once) ..."
-cargo build --quiet >/dev/null
+cargo build --quiet >/dev/null || true
 BIN="${REPO_ROOT}/target/debug/kademlia"
 if [[ ! -x "${BIN}" ]]; then
   echo "Binary not found at ${BIN}" >&2
@@ -39,10 +39,12 @@ start_seed() {
   local port="$1"
   local log="${LOG_DIR}/peer-${port}.log"
   echo "Starting seed peer on 127.0.0.1:${port} (logs: ${log})"
-  # Run as a seed (no bootstrap)
-  # Default to verbose logs; allow override via outer RUST_LOG
-  ( RUST_LOG="${RUST_LOG:-kademlia=debug}" "${BIN}" peer --bind 127.0.0.1:"${port}" --k "${K}" --alpha "${ALPHA}" \
-      >"${log}" 2>&1 ) &
+  # Run as a seed (no bootstrap); default to verbose logs unless RUST_LOG set
+  (
+    RUST_LOG="${RUST_LOG:-kademlia=debug}" \
+    "${BIN}" peer --bind 127.0.0.1:"${port}" --k "${K}" --alpha "${ALPHA}" \
+      >>"${log}" 2>&1
+  ) &
   PEER_PIDS+=($!)
   SEED_ADDRS+=("127.0.0.1:${port}")
 }
@@ -55,9 +57,11 @@ start_join_peer() {
   for a in "${SEED_ADDRS[@]}"; do
     bootstrap_args+=(--bootstrap "$a")
   done
-  # Default to verbose logs; allow override via outer RUST_LOG
-  ( RUST_LOG="${RUST_LOG:-kademlia=debug}" "${BIN}" peer --bind 127.0.0.1:0 "${bootstrap_args[@]}" --k "${K}" --alpha "${ALPHA}" \
-      >"${log}" 2>&1 ) &
+  (
+    RUST_LOG="${RUST_LOG:-kademlia=debug}" \
+    "${BIN}" peer --bind 127.0.0.1:0 "${bootstrap_args[@]}" --k "${K}" --alpha "${ALPHA}" \
+      >>"${log}" 2>&1
+  ) &
   PEER_PIDS+=($!)
 }
 
@@ -93,11 +97,10 @@ for a in "${SEED_ADDRS[@]}"; do
 done
 
 echo "\nPUT via client ..."
-PUT_OUT=$("${BIN}" put --bind 127.0.0.1:0 "${bootstrap_flags[@]}" --value "${VALUE}" || true)
+PUT_OUT=$("${BIN}" put --bind 127.0.0.1:0 "${bootstrap_flags[@]}" --k "${K}" --alpha "${ALPHA}" --value "${VALUE}" || true)
 echo "${PUT_OUT}" | sed 's/^/  /'
 
 # Extract key(hex)=... from Put output (robust against spacing)
-# Example line: "key(hex)=900b16cb30..."
 KEY_HEX=$(echo "${PUT_OUT}" | sed -n 's/.*key(hex)=//p' | head -n1 | tr -d '[:space:]')
 if [[ -z "${KEY_HEX}" ]]; then
   echo "Failed to parse key from PUT output. Aborting." >&2
@@ -107,7 +110,7 @@ fi
 echo "\nGET via client for key=${KEY_HEX} (retrying) ..."
 FOUND=0
 for attempt in {1..10}; do
-  GET_OUT=$("${BIN}" get --bind 127.0.0.1:0 "${bootstrap_flags[@]}" "${KEY_HEX}" || true)
+  GET_OUT=$("${BIN}" get --bind 127.0.0.1:0 "${bootstrap_flags[@]}" --k "${K}" --alpha "${ALPHA}" "${KEY_HEX}" || true)
   echo "Attempt ${attempt}:"; echo "${GET_OUT}" | sed 's/^/  /'
   if echo "${GET_OUT}" | grep -q "^OK:"; then
     FOUND=1
@@ -122,3 +125,4 @@ fi
 echo "\nDone. Logs in ${LOG_DIR}. Peers will be terminated now."
 
 popd >/dev/null
+

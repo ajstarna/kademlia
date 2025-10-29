@@ -38,7 +38,7 @@ async fn end_to_end_put_get() -> anyhow::Result<()> {
 
     // Start a DHT node bound to an ephemeral local port, bootstrapping explicitly against the two seeds
     let bootstrap_addrs: Vec<SocketAddr> = vec![s1_addr, s2_addr];
-    let dht = KademliaDHT::start_client("127.0.0.1:0", bootstrap_addrs).await?;
+    let dht = KademliaDHT::start_client("127.0.0.1:0", bootstrap_addrs, 20, 3).await?;
 
     // Allow bootstrap FindNode/Nodes to exchange and populate the DHT's routing table
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -115,7 +115,7 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
     let value: Value = b"replication-value".to_vec();
 
     // Use a real DHT handle for the client behavior
-    let client_dht = KademliaDHT::start_client("127.0.0.1:0", seed_addrs.clone()).await?;
+    let client_dht = KademliaDHT::start_client("127.0.0.1:0", seed_addrs.clone(), 20, 3).await?;
     let client_info = client_dht.node_info;
     let _ = client_dht.put(key, value.clone()).await?;
 
