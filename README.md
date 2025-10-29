@@ -1,7 +1,7 @@
 # kademlia
 Implementing the Kademlia distributed hash table from scratch.
 
-Follows as much as possible the original paper: https://www.cs.cornell.edu/people/egs/714-spring05/kademlia.pdf
+Follows as much as possible the original paper: https://pdos.csail.mit.edu/~petar/papers/maymounkov-kademlia-lncs.pdf
 
 Uses MessagePack for the wire format: https://msgpack.org/
 
