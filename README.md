@@ -13,6 +13,7 @@ Known, intentional deviations from the paper:
 
 - `src/core/*`: identifiers, routing table, and value storage.
 - `src/protocol/*`: main networking loop; message handling, lookups, probes, routing table updates.
+    - note: see `ProtocolManager::run()` for an entry point to the code base.
 - `src/dht.rs`: small async client API that drives `ProtocolManager` via commands.
 - `src/main.rs`: CLI entry point.
 

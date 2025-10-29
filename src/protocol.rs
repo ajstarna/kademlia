@@ -648,7 +648,7 @@ impl ProtocolManager {
         lookup_effects
     }
 
-    /// Listen for messages in an infinite loop, and respond accordingly
+    /// Listen for messages, user commands, and timeouts in an infinite loop, and respond accordingly.
     pub async fn run(mut self) {
         let mut buf = [0u8; 1024];
 
