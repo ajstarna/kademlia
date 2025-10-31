@@ -1,10 +1,27 @@
 - improve/more logs?
 
-- bucket refresh
+- the paper says node lookups return the k from the closest BUCKET; it doesn't simply say the closest k nodes.
+  - is this meaningful/important?
 
-- make sure we are removing dead nodes properly when they don't respond or other cases.
+- things missing as described in the paper:
+    Protocol:
+    - echo RPC random ID to help with address forgery
+    - optional "ping piggy back"
+    - nodes that fail to respond during a lookup process are removed until they respond
+    - TTL on stored data (e.g. 24 hours). So original publisher should republish as needed.
+    - for caching purposes, once a value lookup suceeds, the requesting node stores the (k, v)
+      at the closest node it observed to the key that did not return the value.
+        - To avoid over caching, inversely proportional TTL (see paper for details)
+    - each node refreshes any bucket to which it has not performed a node lookup in the past hour.
+        - refreshing means picking a random ID in the bucket's range and performing a node search for that ID.
+    - when a node enters the network, it lookups itself (which I already coded), but then it needs to refresh
+      all k-buckets further away than its closest neighbour (whats the neighbour? a bucket? a node?)
 
-- general skim paper to make sure we are covering everything
+    Routing Table:
+    - special rule about sometimes keeping more than k contacts (see routing paper section for details)
+
+    Key, Value republishing:
+    - there is a whole big section on this
 
 - the DHT class should use actual errors types since user facing
 
