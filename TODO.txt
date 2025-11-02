@@ -1,14 +1,10 @@
 - improve/more logs?
 
-- the paper says node lookups return the k from the closest BUCKET; it doesn't simply say the closest k nodes.
-  - is this meaningful/important?
-
 - things missing as described in the paper:
     Protocol:
     - echo RPC random ID to help with address forgery
     - optional "ping piggy back"
     - nodes that fail to respond during a lookup process are removed until they respond
-    - TTL on stored data (e.g. 24 hours). So original publisher should republish as needed.
     - for caching purposes, once a value lookup suceeds, the requesting node stores the (k, v)
       at the closest node it observed to the key that did not return the value.
         - To avoid over caching, inversely proportional TTL (see paper for details)
