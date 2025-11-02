@@ -41,4 +41,8 @@ impl NodeState {
     pub fn get(&self, key: &Key) -> Option<&Value> {
         self.storage.get(key)
     }
+
+    pub fn purge_expired(&mut self) {
+        self.storage.purge_expired();
+    }
 }

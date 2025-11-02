@@ -36,9 +36,11 @@ pub enum Command {
         tx_done: oneshot::Sender<()>,
     },
     /// Initiate bootstrap by sending `FindNode(self)` to the given seed
-    /// addresses. Responses are handled by the event loop to populate the
-    /// routing table and drive a self-lookup toward convergence.
-    Bootstrap { addrs: Vec<SocketAddr> },
+    /// addresses, and complete when the self-lookup converges.
+    Bootstrap {
+        addrs: Vec<SocketAddr>,
+        tx_done: oneshot::Sender<()>,
+    },
 
     /// Test/debug helper: query whether this node currently has a value for `key`.
     /// Replies `true` if present in local storage.
@@ -46,4 +48,7 @@ pub enum Command {
         key: Key,
         tx_has: oneshot::Sender<bool>,
     },
+
+    /// Test/debug: get the current number of peers in the routing table.
+    DebugPeerCount { tx_count: oneshot::Sender<usize> },
 }

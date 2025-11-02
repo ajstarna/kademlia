@@ -271,12 +271,19 @@ impl ProtocolManager {
                 info!(key=?key, value=?value, "Put Command");
                 self.start_lookup_with_put(key, value, tx_done)
             }
-            Command::Bootstrap { addrs } => {
+            Command::Bootstrap { addrs, tx_done } => {
                 info!(addrs=?addrs, "Bootstrap Command");
                 let my_id = self.node.my_info.node_id;
                 // Initialize a pending self-lookup with empty initial candidates
-                let mut effs =
-                    self.init_lookup(my_id, LookupKind::Node, None, Vec::new(), None, None);
+                let mut effs = self.init_lookup(
+                    my_id,
+                    LookupKind::Node,
+                    None,
+                    Vec::new(),
+                    None,
+                    Some(tx_done),
+                    /*early_complete_on_empty=*/ false,
+                );
 
                 // Send initial FindNode(self) to the seed addresses
                 let query = Message::FindNode {
@@ -298,6 +305,11 @@ impl ProtocolManager {
                 let _ = tx_has.send(has);
                 Vec::new()
             }
+            Command::DebugPeerCount { tx_count } => {
+                let cnt = self.node.routing_table.peer_count();
+                let _ = tx_count.send(cnt);
+                Vec::new()
+            }
         };
         Ok(effects)
     }
@@ -310,6 +322,7 @@ impl ProtocolManager {
         initial: Vec<NodeInfo>,
         put_value: Option<Value>,
         tx_done: Option<oneshot::Sender<()>>,
+        early_complete_on_empty: bool,
     ) -> Vec<Effect> {
         let mut lookup = Lookup::new(
             self.k,
@@ -323,17 +336,72 @@ impl ProtocolManager {
 
         let lookup_effects = lookup.top_up_alpha_requests();
 
+        if early_complete_on_empty && lookup_effects.is_empty() && lookup.in_flight.is_empty() {
+            let rt_peers = self.node.routing_table.peer_count();
+            match kind {
+                LookupKind::Node => {
+                    if rt_peers == 0 {
+                        error!(
+                            event="lookup_empty_initial",
+                            kind="put/node",
+                            role=?self.role(),
+                            lookup_target=?key,
+                            rt_peers,
+                            "No initial peers; routing table is empty. Likely bootstrap misconfiguration or network issue. Completing without STOREs."
+                        );
+                    } else {
+                        error!(
+                            event="lookup_empty_initial_inconsistent",
+                            kind="put/node",
+                            role=?self.role(),
+                            lookup_target=?key,
+                            rt_peers,
+                            "Shortlist empty despite non-empty routing table; this may be a bug. Completing without STOREs."
+                        );
+                    }
+                    if let Some(done) = tx_done {
+                        let _ = done.send(());
+                    }
+                }
+                LookupKind::Value => {
+                    if rt_peers == 0 {
+                        error!(
+                            event="lookup_empty_initial",
+                            kind="get/value",
+                            role=?self.role(),
+                            lookup_target=?key,
+                            rt_peers,
+                            "No initial peers; routing table is empty. Likely bootstrap misconfiguration or network issue. Returning None."
+                        );
+                    } else {
+                        error!(
+                            event="lookup_empty_initial_inconsistent",
+                            kind="get/value",
+                            role=?self.role(),
+                            lookup_target=?key,
+                            rt_peers,
+                            "Shortlist empty despite non-empty routing table; this may be a bug. Returning None."
+                        );
+                    }
+                    if let Some(tx) = tx_value {
+                        let _ = tx.send(None);
+                    }
+                }
+            }
+            return Vec::new();
+        }
+
         let deadline = Instant::now() + LOOKUP_TIMEOUT;
-        self.pending_lookups.insert(
-            key,
-            PendingLookup {
-                lookup,
-                deadline,
-                put_value,
-                tx_done,
-                tx_value,
-            },
-        );
+
+        let new_pending = PendingLookup {
+            lookup,
+            deadline,
+            put_value,
+            tx_done,
+            tx_value,
+        };
+
+        self.pending_lookups.insert(key, new_pending);
 
         lookup_effects
     }
@@ -345,7 +413,15 @@ impl ProtocolManager {
         tx_value: oneshot::Sender<Option<Value>>,
     ) -> Vec<Effect> {
         let initial = self.node.routing_table.k_closest(key);
-        self.init_lookup(key, kind, Some(tx_value), initial, None, None)
+        self.init_lookup(
+            key,
+            kind,
+            Some(tx_value),
+            initial,
+            None,
+            None,
+            /*early_complete_on_empty=*/ true,
+        )
     }
 
     fn start_lookup_with_put(
@@ -362,6 +438,7 @@ impl ProtocolManager {
             initial,
             Some(value),
             Some(tx_done),
+            /*early_complete_on_empty=*/ true,
         )
     }
 
@@ -509,10 +586,8 @@ impl ProtocolManager {
                     // we got a nodes message with no corresponding lookup... curious.
                 }
                 if remove_lookup {
+                    // remove the lookup from pending lookups, and send final results back to the user dht
                     if let Some(mut finished) = self.pending_lookups.remove(&target) {
-                        // We've already enqueued any Store effects above if this was a Put.
-                        // Finalize cleanup: drop any remaining put_value and notify waiters.
-                        let _ = finished.put_value.take();
                         if let Some(done) = finished.tx_done.take() {
                             let _ = done.send(());
                         }
@@ -654,6 +729,7 @@ impl ProtocolManager {
 
         let mut ticker = interval(Duration::from_millis(500)); // how often do we clean expired probes and lookups
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut last_storage_purge = Instant::now();
 
         loop {
             tokio::select! {
@@ -715,6 +791,12 @@ impl ProtocolManager {
 
                         for eff in lookup_effects {
                 self.apply_effect(eff).await;
+                        }
+
+                        // Periodically purge expired local key/value entries (throttled)
+                        if now.duration_since(last_storage_purge) >= Duration::from_secs(5) {
+                            self.node.purge_expired();
+                            last_storage_purge = now;
                         }
 
                     }

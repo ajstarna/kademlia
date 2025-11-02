@@ -225,6 +225,17 @@ impl RoutingTable {
         self.find(node_id).is_some()
     }
 
+    /// Return the total number of peers currently stored across all buckets.
+    pub fn peer_count(&self) -> usize {
+        fn count_nodes(t: &BucketTree) -> usize {
+            match t {
+                BucketTree::Bucket(b) => b.node_infos.len(),
+                BucketTree::Branch { zero, one, .. } => count_nodes(zero) + count_nodes(one),
+            }
+        }
+        count_nodes(&self.tree)
+    }
+
     pub fn find(&self, node_id: NodeID) -> Option<&NodeInfo> {
         fn walk<'a>(t: &'a BucketTree, node_id: NodeID) -> Option<&'a NodeInfo> {
             match t {

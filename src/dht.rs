@@ -35,11 +35,39 @@ impl KademliaDHT {
         // Now that the manager is running, we send our bootstrap command.
         // This initiates a lookup of our own node id, which populates our routing table with
         // nodes close to ours (as specified by the Kademlia paper).
+        let (btx, brx) = oneshot::channel::<()>();
+        let seeds_len = bootstrap_addrs.len();
         mpsc::Sender::clone(&tx)
             .send(Command::Bootstrap {
                 addrs: bootstrap_addrs,
+                tx_done: btx,
             })
             .await?;
+        // Wait for bootstrap convergence with a timeout to avoid hanging on bad seeds
+        let timeout = std::time::Duration::from_secs(3);
+        match tokio::time::timeout(timeout, brx).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_canceled)) => {
+                return Err(anyhow::anyhow!("bootstrap canceled by protocol task"))
+            }
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "bootstrap timed out after {:?} (seeds={})",
+                    timeout,
+                    seeds_len
+                ))
+            }
+        }
+
+        // Verify that bootstrap actually discovered peers; fail fast if none
+        let (ct_tx, ct_rx) = oneshot::channel::<usize>();
+        mpsc::Sender::clone(&tx)
+            .send(Command::DebugPeerCount { tx_count: ct_tx })
+            .await?;
+        let peer_count = ct_rx.await.unwrap_or(0);
+        if peer_count == 0 {
+            anyhow::bail!("bootstrap completed but discovered 0 peers; check seeds or network");
+        }
 
         Ok(Self {
             tx,
@@ -52,22 +80,48 @@ impl KademliaDHT {
     pub async fn start_peer(
         bind_addr: &str,
         bootstrap_addrs: Vec<std::net::SocketAddr>,
+        k: usize,
+        alpha: usize,
     ) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel::<Command>(100);
         let socket = UdpSocket::bind(bind_addr).await?;
         let local_addr = socket.local_addr()?;
-        let k = 20;
-        let alpha = 3;
         let manager = ProtocolManager::new(socket, rx, k, alpha)?;
         let node_info = manager.node.my_info;
 
         tokio::spawn(manager.run());
 
+        let (btx, brx) = oneshot::channel::<()>();
+        let seeds_len = bootstrap_addrs.len();
         mpsc::Sender::clone(&tx)
             .send(Command::Bootstrap {
                 addrs: bootstrap_addrs,
+                tx_done: btx,
             })
             .await?;
+        let timeout = std::time::Duration::from_secs(3);
+        match tokio::time::timeout(timeout, brx).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_canceled)) => {
+                return Err(anyhow::anyhow!("bootstrap canceled by protocol task"))
+            }
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "bootstrap timed out after {:?} (seeds={})",
+                    timeout,
+                    seeds_len
+                ))
+            }
+        }
+
+        let (ct_tx, ct_rx) = oneshot::channel::<usize>();
+        mpsc::Sender::clone(&tx)
+            .send(Command::DebugPeerCount { tx_count: ct_tx })
+            .await?;
+        let peer_count = ct_rx.await.unwrap_or(0);
+        if peer_count == 0 {
+            anyhow::bail!("bootstrap completed but discovered 0 peers; check seeds or network");
+        }
 
         Ok(Self {
             tx,

@@ -97,12 +97,15 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
         let info = pm.node.my_info;
         let tx_clone = tx.clone();
         tokio::spawn(pm.run());
-        // Bootstrap to seeds
+        // Bootstrap to seeds and wait for convergence
+        let (btx, brx) = tokio::sync::oneshot::channel::<()>();
         tx_clone
             .send(Command::Bootstrap {
                 addrs: seed_addrs.clone(),
+                tx_done: btx,
             })
             .await?;
+        let _ = brx.await;
         all_senders.push(tx);
         all_infos.push(info);
     }
@@ -114,8 +117,9 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
     let key: Key = NodeID::from_hashed(&"replication-key");
     let value: Value = b"replication-value".to_vec();
 
-    // Use a real DHT handle for the client behavior
-    let client_dht = KademliaDHT::start_client("127.0.0.1:0", seed_addrs.clone(), 20, 3).await?;
+    // Use a real DHT handle for the publisher; run as a peer so it stores
+    let client_dht = KademliaDHT::start_peer("127.0.0.1:0", seed_addrs.clone(), k, alpha).await?;
+
     let client_info = client_dht.node_info;
     let _ = client_dht.put(key, value.clone()).await?;
 

@@ -144,13 +144,39 @@ async fn main() -> anyhow::Result<()> {
 
                 tokio::spawn(manager.run());
 
-                // Give the protocol task a moment to start
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
                 // Initiate bootstrap
-                tx.send(Command::Bootstrap { addrs: boot_addrs }).await?;
+                let (btx, brx) = tokio::sync::oneshot::channel::<()>();
+                let seed_count = boot_addrs.len();
+                tx.send(Command::Bootstrap {
+                    addrs: boot_addrs,
+                    tx_done: btx,
+                })
+                .await?;
+                let timeout = std::time::Duration::from_secs(3);
+                match tokio::time::timeout(timeout, brx).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) => anyhow::bail!("bootstrap canceled by protocol task"),
+                    Err(_) => anyhow::bail!(
+                        "bootstrap timed out after {:?} (seeds={})",
+                        timeout,
+                        seed_count
+                    ),
+                }
 
                 tracing::info!(peers=%bootstrap.len(), "Bootstrapping; press Ctrl-C to exit");
+
+                // Sanity-check that we discovered peers; exit if not
+                // We don't have access to the manager's internals; instead, make a quick query
+                // by creating a temporary oneshot via the existing tx.
+                let (qtx, qrx) = tokio::sync::oneshot::channel::<usize>();
+                tx.send(kademlia::protocol::Command::DebugPeerCount { tx_count: qtx })
+                    .await?;
+                let peers = qrx.await.unwrap_or(0);
+                if peers == 0 {
+                    anyhow::bail!(
+                        "bootstrap completed but discovered 0 peers; check seeds or network"
+                    );
+                }
 
                 // Stay alive until Ctrl-C
                 tokio::signal::ctrl_c().await?;

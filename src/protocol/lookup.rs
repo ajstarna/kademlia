@@ -9,7 +9,7 @@ use crate::core::storage::Value;
 // Timeouts specific to lookup requests
 pub(super) const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub(super) enum LookupKind {
     Node,  // FIND_NODE
     Value, // FIND_VALUE
@@ -22,6 +22,7 @@ pub(super) enum LookupResult {
     Closest(Vec<NodeInfo>),
 }
 
+#[derive(Debug)]
 pub(super) struct Lookup {
     pub(super) k: usize,
     pub(super) alpha: usize,
@@ -157,6 +158,7 @@ impl Lookup {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct PendingLookup {
     pub(super) lookup: Lookup,
     pub(super) deadline: Instant,
