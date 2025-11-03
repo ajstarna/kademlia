@@ -214,10 +214,10 @@ impl RoutingTable {
     }
 
     /// Collect every NodeInfo in the tree. Handy for tests and simple impls.
-    fn all_nodes(&self) -> Vec<&NodeInfo> {
-        fn walk<'a>(t: &'a BucketTree, out: &mut Vec<&'a NodeInfo>) {
+    fn all_nodes(&self) -> Vec<NodeInfo> {
+        fn walk(t: &BucketTree, out: &mut Vec<NodeInfo>) {
             match t {
-                BucketTree::Bucket(b) => out.extend(b.node_infos.iter()),
+                BucketTree::Bucket(b) => out.extend(b.node_infos.iter().cloned()),
                 BucketTree::Branch { one, zero, .. } => {
                     walk(one, out);
                     walk(zero, out);
@@ -302,7 +302,7 @@ impl RoutingTable {
     }
 
     pub fn find(&self, node_id: NodeID) -> Option<&NodeInfo> {
-        fn walk<'a>(t: &'a BucketTree, node_id: NodeID) -> Option<&'a NodeInfo> {
+        fn walk(t: &BucketTree, node_id: NodeID) -> Option<&NodeInfo> {
             match t {
                 BucketTree::Bucket(b) => b.find(node_id), // assume KBucket has a find
                 BucketTree::Branch { zero, one, .. } => {
@@ -314,7 +314,7 @@ impl RoutingTable {
     }
 
     pub fn find_mut(&mut self, node_id: NodeID) -> Option<&mut NodeInfo> {
-        fn walk<'a>(t: &'a mut BucketTree, node_id: NodeID) -> Option<&'a mut NodeInfo> {
+        fn walk(t: &mut BucketTree, node_id: NodeID) -> Option<&mut NodeInfo> {
             match t {
                 BucketTree::Bucket(b) => b.find_mut(node_id),
                 BucketTree::Branch { zero, one, .. } => {
@@ -327,6 +327,27 @@ impl RoutingTable {
             }
         }
         walk(&mut self.tree, node_id)
+    }
+
+    /// Generate random target IDs for all buckets that do NOT cover `my_id`.
+    /// These targets can be used to refresh those buckets per Kademlia join procedure.
+    pub fn non_self_bucket_targets(&self, my_id: NodeID) -> Vec<NodeID> {
+        fn walk(t: &BucketTree, my_id: NodeID, out: &mut Vec<NodeID>) {
+            match t {
+                BucketTree::Bucket(b) => {
+                    if !b.covers(my_id) {
+                        out.push(random_id_with_prefix(b.prefix, b.depth));
+                    }
+                }
+                BucketTree::Branch { zero, one, .. } => {
+                    walk(zero, my_id, out);
+                    walk(one, my_id, out);
+                }
+            }
+        }
+        let mut v = Vec::new();
+        walk(&self.tree, my_id, &mut v);
+        v
     }
 
     pub fn remove_peer(&mut self, node_id: NodeID) -> bool {
@@ -347,7 +368,7 @@ impl RoutingTable {
     /// TODO: do a more efficient search, keeping a heap of buckets and looking at the closest
     /// buckets until we have K nodes.
     pub fn k_closest(&self, target_id: NodeID) -> Vec<NodeInfo> {
-        let mut nodes: Vec<NodeInfo> = self.all_nodes().into_iter().cloned().collect();
+        let mut nodes: Vec<NodeInfo> = self.all_nodes();
         nodes.sort_by_key(|n| n.node_id.distance(&target_id));
         nodes.truncate(self.k);
         nodes

@@ -625,6 +625,27 @@ impl ProtocolManager {
                             let _ = tx.send(None);
                         }
                     }
+                    // If this was the bootstrap self-lookup (FindNode(self)), refresh all non-self buckets.
+		    // This is the second part of the process of entering the network as described in the paper.
+                    if target == self.node.my_info.node_id {
+                        let refresh_targets = self
+                            .node
+                            .routing_table
+                            .non_self_bucket_targets(self.node.my_info.node_id);
+                        for t in refresh_targets.into_iter() {
+                            let initial = self.node.routing_table.k_closest(t);
+                            let mut effs = self.init_lookup(
+                                t,
+                                LookupKind::Node,
+                                None,
+                                initial,
+                                None,
+                                None,
+                                /*early_complete_on_empty=*/ true,
+                            );
+                            effects.append(&mut effs);
+                        }
+                    }
                 }
                 (node_id, is_client)
             }
