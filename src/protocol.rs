@@ -734,7 +734,7 @@ impl ProtocolManager {
 
     /// check for and resolve expired probes, and check for expired lookups.
     /// Returns any new Effects (probe restarts, lookup top-ups).
-    fn sweep_timeouts_and_topup(&mut self, now: Instant) -> Vec<Effect> {
+    fn sweep_timeouts_and_topup(&mut self, now: Instant, now_std: std::time::Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
 
         // Expired probes: evict LRU and try to insert queued candidates; if still full, start a new probe.
@@ -800,7 +800,6 @@ impl ProtocolManager {
         // towards a random ID within each stale bucket's keyspace.
         // Limit the number of refreshes per sweep to avoid bursts.
         let refresh_limit_per_tick = 1usize;
-        let now_std = std::time::Instant::now();
         let ttl = std::time::Duration::from_secs(60 * 60); // 1 hour per Kademlia recommendation
         let targets = self
             .node
@@ -888,7 +887,7 @@ impl ProtocolManager {
 
                     _ = ticker.tick() => {
                         let now = Instant::now();
-                let lookup_effects = self.sweep_timeouts_and_topup(now);
+                        let lookup_effects = self.sweep_timeouts_and_topup(now, std::time::Instant::now());
 
                         for eff in lookup_effects {
                 self.apply_effect(eff).await;
@@ -1138,7 +1137,7 @@ mod test {
 
         // Act: advance time and sweep so the probe times out (evict LRU and insert candidate(s))
         let now = Instant::now() + Duration::from_secs(10);
-        let effects = pm.sweep_timeouts_and_topup(now);
+        let effects = pm.sweep_timeouts_and_topup(now, std::time::Instant::now());
 
         // Assert: first candidate was inserted into the routing table
         assert!(
@@ -1416,7 +1415,7 @@ mod test {
         tokio::time::advance(Duration::from_secs(3)).await;
         let now = Instant::now();
 
-        let effects = pm.sweep_timeouts_and_topup(now);
+        let effects = pm.sweep_timeouts_and_topup(now, std::time::Instant::now());
 
         // Expect a new FindValue to the third peer
         let mut sent_to_p3 = false;
@@ -1718,7 +1717,7 @@ mod test {
         );
 
         // Optional: sweep to mimic periodic maintenance; still no effects expected
-        let effects = pm.sweep_timeouts_and_topup(Instant::now());
+        let effects = pm.sweep_timeouts_and_topup(Instant::now(), std::time::Instant::now());
         let find_node_sends = effects
             .into_iter()
             .filter(|eff| match eff {
@@ -1857,5 +1856,49 @@ mod test {
         );
 
         // Put is fire-and-forget; no ack to await
+    }
+
+    #[tokio::test]
+    async fn test_bucket_refresh_triggers_lookup() {
+        // Arrange: headless PM with some peers in the routing table so refresh has initial candidates
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 3, 1).unwrap();
+
+        // Insert a few peers; absorb splits as needed
+        let p1 = make_peer(1, 9301, 0x00);
+        let p2 = make_peer(2, 9302, 0x40);
+        let p3 = make_peer(3, 9303, 0x80);
+        let mut insert = |peer: NodeInfo| loop {
+            match pm.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+        insert(p1);
+        insert(p2);
+        insert(p3);
+
+        // Act: sweep with std-time far in the future so buckets appear stale
+        let effects = pm.sweep_timeouts_and_topup(
+            Instant::now(),
+            std::time::Instant::now() + std::time::Duration::from_secs(2 * 60 * 60),
+        );
+
+        // Assert: at least one FindNode send is scheduled and a pending lookup is registered
+        let mut saw_findnode = false;
+        for eff in effects {
+            if let Effect::Send { bytes, .. } = eff {
+                if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if matches!(msg, Message::FindNode { .. }) {
+                        saw_findnode = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_findnode, "refresh sweep should start a FindNode lookup");
+        assert!(
+            !pm.pending_lookups.is_empty(),
+            "refresh should register a pending lookup"
+        );
     }
 }
