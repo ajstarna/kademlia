@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use super::identifier::{NodeID, NodeInfo};
 
@@ -8,6 +9,7 @@ struct KBucket {
     depth: usize,                   // number of prefix bits fixed to get to this bucket
     prefix: Option<NodeID>,         // only top `self.depth` bits are meaningful
     node_infos: VecDeque<NodeInfo>, // LRU peer is at the back of the vecdeque
+    last_refreshed: Instant,        // when this bucket last saw activity
 }
 
 impl KBucket {
@@ -17,6 +19,7 @@ impl KBucket {
             depth,
             prefix,
             node_infos: VecDeque::with_capacity(k),
+            last_refreshed: Instant::now(),
         }
     }
 
@@ -28,6 +31,7 @@ impl KBucket {
             depth: 9,
             prefix: None,
             node_infos: VecDeque::new(),
+            last_refreshed: Instant::now(),
         }
     }
 
@@ -47,6 +51,8 @@ impl KBucket {
     /// If it exists, we update its info.
     /// If the bucket is full, we signal for a probe on the LRU peer, else we add to the front as the new MRU
     pub fn upsert(&mut self, peer: NodeInfo) -> InsertResult {
+        // Any interaction with this bucket counts as activity
+        self.last_refreshed = Instant::now();
         if let Some(pos) = self
             .node_infos
             .iter()
@@ -80,6 +86,8 @@ impl KBucket {
     // Remove the peer with the given node_id if it exists
     // Return a bool to say if the node indeed existed and was removed
     pub fn remove_peer(&mut self, node_id: NodeID) -> bool {
+        // Removal also counts as activity
+        self.last_refreshed = Instant::now();
         if let Some(pos) = self.node_infos.iter().position(|n| n.node_id == node_id) {
             self.node_infos.remove(pos);
             true
@@ -219,6 +227,63 @@ impl RoutingTable {
         let mut v = Vec::new();
         walk(&self.tree, &mut v);
         v
+    }
+
+    /// Return a list of random target IDs for buckets that appear stale.
+    /// At most `limit` targets are returned.
+    pub fn stale_bucket_targets(&self, now: Instant, ttl: Duration, limit: usize) -> Vec<NodeID> {
+        let mut out = Vec::new();
+        fn walk(
+            t: &BucketTree,
+            now: Instant,
+            ttl: Duration,
+            out: &mut Vec<NodeID>,
+            limit: usize,
+        ) {
+            if out.len() >= limit {
+                return;
+            }
+            match t {
+                BucketTree::Bucket(b) => {
+                    if now.duration_since(b.last_refreshed) >= ttl {
+                        // Build a random ID whose first `depth` bits match this bucket's prefix
+                        let target = random_id_with_prefix(b.prefix, b.depth);
+                        out.push(target);
+                    }
+                }
+                BucketTree::Branch { zero, one, .. } => {
+                    walk(zero, now, ttl, out, limit);
+                    if out.len() < limit {
+                        walk(one, now, ttl, out, limit);
+                    }
+                }
+            }
+        }
+        walk(&self.tree, now, ttl, &mut out, limit);
+        out
+    }
+
+    /// Mark the leaf bucket containing `id` as refreshed at `now`.
+    pub fn mark_bucket_refreshed(&mut self, id: NodeID, now: Instant) {
+        fn walk(t: &mut BucketTree, id: NodeID, now: Instant) {
+            match t {
+                BucketTree::Bucket(b) => {
+                    b.last_refreshed = now;
+                }
+                BucketTree::Branch {
+                    bit_index,
+                    zero,
+                    one,
+                } => {
+                    if id.get_bit_at(*bit_index) == 0 {
+                        walk(zero, id, now)
+                    } else {
+                        walk(one, id, now)
+                    }
+                }
+            }
+        }
+        walk(&mut self.tree, id, now);
     }
 
     pub fn contains(&self, node_id: NodeID) -> bool {
@@ -372,6 +437,19 @@ impl RoutingTable {
             self.remove_peer(peer.node_id);
         }
     }
+}
+
+/// Construct a random NodeID whose first `depth` bits match `prefix`.
+fn random_id_with_prefix(prefix: Option<NodeID>, depth: usize) -> NodeID {
+    if depth == 0 {
+        return NodeID::new();
+    }
+    let p = prefix.expect("prefix must exist when depth > 0");
+    let mut id = NodeID::new();
+    for i in 0..depth {
+        id = id.with_bit(i, p.get_bit_at(i));
+    }
+    id
 }
 
 #[cfg(test)]

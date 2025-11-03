@@ -795,6 +795,32 @@ impl ProtocolManager {
             let current_effects = pending_lookup.lookup.top_up_alpha_requests();
             effects.extend(current_effects);
         }
+
+        // Bucket refreshes: periodically refresh stale buckets by initiating a node lookup
+        // towards a random ID within each stale bucket's keyspace.
+        // Limit the number of refreshes per sweep to avoid bursts.
+        let refresh_limit_per_tick = 1usize;
+        let now_std = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(60 * 60); // 1 hour per Kademlia recommendation
+        let targets = self
+            .node
+            .routing_table
+            .stale_bucket_targets(now_std, ttl, refresh_limit_per_tick);
+        for target in targets.into_iter() {
+            // Pre-mark the bucket to avoid immediate rescheduling on next tick
+            self.node.routing_table.mark_bucket_refreshed(target, now_std);
+            let initial = self.node.routing_table.k_closest(target);
+            let mut effs = self.init_lookup(
+                target,
+                LookupKind::Node,
+                None,
+                initial,
+                None,
+                None,
+                /*early_complete_on_empty=*/ true,
+            );
+            effects.append(&mut effs);
+        }
         effects
     }
 
