@@ -19,6 +19,8 @@
     Key, Value republishing:
     - there is a whole big section on this
 
+- some dht implementations use a replacement cache per bucket
+
 - the DHT class should use actual errors types since user facing
 
 - how to test at scale and in a real network setting?

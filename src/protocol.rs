@@ -86,15 +86,17 @@ enum Effect {
         bytes: Vec<u8>,
     },
     StartProbe {
-        peer: NodeInfo,
+        lru: NodeInfo,
+        candidates: Vec<NodeInfo>,
         probe_id: ProbeID,
         bytes: Vec<u8>,
     },
 }
 
-#[derive(Copy, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct PendingProbe {
-    peer: NodeInfo,
+    lru: NodeInfo,
+    candidates: Vec<NodeInfo>,
     deadline: Instant,
 }
 
@@ -107,6 +109,7 @@ pub struct ProtocolManager {
     pub k: usize,
     pub alpha: usize, // concurrency parameter
     pub pending_probes: HashMap<ProbeID, PendingProbe>,
+    pub pending_probe_by_lru: HashMap<NodeID, ProbeID>,
     pub pending_lookups: HashMap<NodeID, PendingLookup>,
     role: NodeRole,
 }
@@ -133,6 +136,7 @@ impl ProtocolManager {
             k,
             alpha,
             pending_probes,
+            pending_probe_by_lru: HashMap::new(),
             pending_lookups,
             role: NodeRole::Peer,
         })
@@ -163,6 +167,12 @@ impl ProtocolManager {
                 }
                 InsertResult::Full { lru } => {
                     // Probe the LRU node to determine if it should be evicted.
+                    if let Some(existing) = self.pending_probe_by_lru.get(&lru.node_id).cloned() {
+                        if let Some(pp) = self.pending_probes.get_mut(&existing) {
+                            pp.candidates.push(peer);
+                        }
+                        break;
+                    }
                     let probe_id = ProbeID::new_random();
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
@@ -178,10 +188,12 @@ impl ProtocolManager {
                         self.pending_probes.insert(
                             probe_id,
                             PendingProbe {
-                                peer: lru,
+                                lru,
+                                candidates: vec![peer],
                                 deadline,
                             },
                         );
+                        self.pending_probe_by_lru.insert(lru.node_id, probe_id);
                     }
                     break;
                 }
@@ -198,7 +210,7 @@ impl ProtocolManager {
         let port = addr.port();
 
         let node = NodeState::new(k, ip, port);
-
+	info!("init headless node with {:?}", node);
         Ok(Self {
             node,
             socket,
@@ -206,6 +218,7 @@ impl ProtocolManager {
             k,
             alpha,
             pending_probes: HashMap::new(),
+            pending_probe_by_lru: HashMap::new(),
             pending_lookups: HashMap::new(),
             role: NodeRole::Peer,
         })
@@ -226,6 +239,7 @@ impl ProtocolManager {
             node_id,
         };
 
+	debug!("OBSERVING");
         loop {
             match self.node.routing_table.try_insert(peer) {
                 InsertResult::SplitOccurred => {
@@ -233,9 +247,11 @@ impl ProtocolManager {
                     // It is possible (though extremely unlikely) that even though we split the leaf bucket,
                     // all existing nodes got moved to the same new bucket, and therefore we need to
                     // continue splitting.
+		    debug!("Split occurred");
                     continue;
                 }
                 InsertResult::Full { lru } => {
+		    debug!("Full bucket");
                     let probe_id = ProbeID::new_random();
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
@@ -243,11 +259,20 @@ impl ProtocolManager {
                         is_client: self.is_client(),
                     };
                     let bytes = rmp_serde::to_vec(&ping).expect("serialize probe Ping");
-                    return Some(Effect::StartProbe {
-                        peer: lru,
-                        probe_id,
-                        bytes,
-                    });
+                    // If a probe for this LRU is already in flight, coalesce by appending the candidate.
+                    if let Some(existing) = self.pending_probe_by_lru.get(&lru.node_id).cloned() {
+                        if let Some(pp) = self.pending_probes.get_mut(&existing) {
+                            pp.candidates.push(peer);
+                        }
+                        return None;
+                    } else {
+                        return Some(Effect::StartProbe {
+                            lru,
+                            candidates: vec![peer],
+                            probe_id,
+                            bytes,
+                        });
+                    }
                 }
                 // TODO: check if we care about other insert result variants
                 _other => break None,
@@ -476,9 +501,10 @@ impl ProtocolManager {
                 debug!(?node_id, "Received Pong");
                 // Maybe mark the node as alive or update routing table
                 if let Some(pending) = self.pending_probes.remove(&probe_id) {
+                    self.pending_probe_by_lru.remove(&pending.lru.node_id);
                     self.node
                         .routing_table
-                        .resolve_probe(pending.peer, /*alive =*/ true);
+                        .resolve_probe(pending.lru, /*alive =*/ true);
                 } else {
                     // TODO: is there more to think about here?
                     warn!(?node_id, probe_id=?probe_id, "Pong received without matching probe");
@@ -678,49 +704,89 @@ impl ProtocolManager {
                 }
             }
             Effect::StartProbe {
-                peer,
+                lru,
+                candidates,
                 probe_id,
                 bytes,
             } => {
-                let addr = SocketAddr::new(peer.ip_address, peer.udp_port);
+                let addr = SocketAddr::new(lru.ip_address, lru.udp_port);
                 if let Err(e) = self.socket.send_to(&bytes, addr).await {
                     error!(%addr, error=%e.to_string(), "Failed to send probe");
                 } else {
                     // Record the probe so we can resolve it later
                     let deadline = Instant::now() + PROBE_TIMEOUT;
                     self.pending_probes
-                        .insert(probe_id, PendingProbe { peer, deadline });
+                        .insert(probe_id, PendingProbe { lru, candidates, deadline });
+                    self.pending_probe_by_lru.insert(lru.node_id, probe_id);
                 }
             }
         }
     }
 
     /// check for and resolve expired probes, and check for expired lookups.
-    /// Returns the possible new topup requests if there were expired lookups.
+    /// Returns any new Effects (probe restarts, lookup top-ups).
     fn sweep_timeouts_and_topup(&mut self, now: Instant) -> Vec<Effect> {
+        let mut effects = Vec::new();
+
+        // Expired probes: evict LRU and try to insert queued candidates; if still full, start a new probe.
         let mut expired_probes = Vec::new();
         for (probe_id, pending_probe) in self.pending_probes.iter() {
             if pending_probe.deadline <= now {
-                expired_probes.push((*probe_id, *pending_probe));
+                expired_probes.push((*probe_id, pending_probe.clone()));
             }
         }
-        for (probe_id, pending) in expired_probes {
+        for (probe_id, mut pending) in expired_probes {
             self.pending_probes.remove(&probe_id);
-            // tell the table that this probe timed out
+            self.pending_probe_by_lru.remove(&pending.lru.node_id);
             let _ = self
                 .node
                 .routing_table
-                .resolve_probe(pending.peer, /*alive=*/ false);
+                .resolve_probe(pending.lru, /*alive=*/ false);
+
+            // we add as many candidates as possible (likely just one?) then satrt a new probe.
+            // the new probe takes the other remaining candidates
+            use std::collections::VecDeque;
+            let mut queue: VecDeque<NodeInfo> = pending.candidates.drain(..).collect();
+            while let Some(candidate) = queue.front().cloned() {
+                match self.node.routing_table.try_insert(candidate) {
+                    InsertResult::SplitOccurred => {
+                        // Retry same candidate after split
+                        continue;
+                    }
+                    InsertResult::Full { lru } => {
+                        // Still full: start a new probe for this (new) LRU and carry remaining candidates.
+                        let probe_id = ProbeID::new_random();
+                        let ping = Message::Ping {
+                            node_id: self.node.my_info.node_id,
+                            probe_id,
+                            is_client: self.is_client(),
+                        };
+                        if let Ok(bytes) = rmp_serde::to_vec(&ping) {
+                            let remaining: Vec<NodeInfo> = queue.into_iter().collect();
+                            effects.push(Effect::StartProbe {
+                                lru,
+                                candidates: remaining,
+                                probe_id,
+                                bytes,
+                            });
+                        }
+                        break;
+                    }
+                    _ => {
+                        // Inserted or Updated; pop and try next
+                        queue.pop_front();
+                    }
+                }
+            }
         }
 
-        // each lookup can clear expired lookups and top them up
-        let mut lookup_effects = Vec::new();
+        // Lookups: clear expired and top up concurrency
         for (_key, pending_lookup) in self.pending_lookups.iter_mut() {
             pending_lookup.lookup.sweep_expired(now);
             let current_effects = pending_lookup.lookup.top_up_alpha_requests();
-            lookup_effects.extend(current_effects);
+            effects.extend(current_effects);
         }
-        lookup_effects
+        effects
     }
 
     /// Listen for messages, user commands, and timeouts in an infinite loop, and respond accordingly.
@@ -983,6 +1049,165 @@ mod test {
         }
         // sanity check that the node that made the request got added to the tree
         assert!(pm.node.routing_table.find(src_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_probe_timeout_inserts_candidate_and_coalesces_followups() {
+        // Arrange a small K so buckets fill quickly
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 2, 1).unwrap();
+
+        // Determine which first-bit is the non-self bucket
+        let self_bit = pm.node.my_info.node_id.get_bit_at(0);
+        let (non_byte, self_byte) = if self_bit == 0 { (0x80, 0x00) } else { (0x00, 0x80) };
+
+        // Helper to absorb possible splits while inserting directly into the routing table
+        let mut insert = |peer: NodeInfo| loop {
+            match pm.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+
+        // Fill root, then cause a split so we have a non-self bucket
+        let pna = make_peer(10, 9001, non_byte);
+        let pnb = make_peer(11, 9002, non_byte);
+        insert(pna);
+        insert(pnb);
+        // This insert should split the root into self/non-self buckets
+        let ps = make_peer(12, 9003, self_byte);
+        insert(ps);
+
+        // Now non-self bucket should be full with pna, pnb (K=2).
+        // Try to add two more peers that land in the same non-self bucket.
+        let c1 = make_peer(13, 9004, non_byte);
+        let c2 = make_peer(14, 9005, non_byte);
+
+        // First candidate triggers a probe to the LRU of that bucket
+        let eff1 = pm
+            .observe_contact(
+                SocketAddr::new(c1.ip_address, c1.udp_port),
+                c1.node_id,
+            )
+            .expect("should start a probe for full bucket");
+        // Apply the probe effect so it is recorded as pending
+        pm.apply_effect(eff1).await;
+
+        // Second candidate should coalesce into the same pending probe (no new effect)
+        let eff2 = pm.observe_contact(
+            SocketAddr::new(c2.ip_address, c2.udp_port),
+            c2.node_id,
+        );
+        assert!(eff2.is_none(), "second candidate should coalesce into existing probe");
+
+        // Act: advance time and sweep so the probe times out (evict LRU and insert candidate(s))
+        let now = Instant::now() + Duration::from_secs(10);
+        let effects = pm.sweep_timeouts_and_topup(now);
+
+        // Assert: first candidate was inserted into the routing table
+        assert!(
+            pm.node.routing_table.contains(c1.node_id),
+            "first candidate should be inserted after LRU timeout"
+        );
+
+        // And we should schedule at most one new probe carrying the remaining candidate(s)
+        let mut start_probe_count = 0usize;
+        let mut carried: Vec<NodeInfo> = Vec::new();
+        for eff in effects.into_iter() {
+            if let Effect::StartProbe {
+                lru: _,
+                candidates,
+                ..
+            } = eff
+            {
+                start_probe_count += 1;
+                carried = candidates;
+            }
+        }
+        assert_eq!(start_probe_count, 1, "should start exactly one follow-up probe");
+        assert_eq!(carried.len(), 1, "one remaining candidate should be carried");
+        assert_eq!(carried[0].node_id, c2.node_id, "carried candidate should be c2");
+    }
+
+    #[tokio::test]
+    async fn test_probe_pong_keeps_lru_and_drops_candidates() {
+        // Arrange K=2 and fill non-self bucket
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 2, 1).unwrap();
+
+        let self_bit = pm.node.my_info.node_id.get_bit_at(0);
+        let (non_byte, self_byte) = if self_bit == 0 { (0x80, 0x00) } else { (0x00, 0x80) };
+
+        let mut insert = |peer: NodeInfo| loop {
+            match pm.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+
+        let pna = make_peer(20, 9101, non_byte);
+        let pnb = make_peer(21, 9102, non_byte);
+        insert(pna);
+        insert(pnb);
+        let ps = make_peer(22, 9103, self_byte);
+        insert(ps);
+
+        // Two candidates arrive targeting the full non-self bucket
+        let c1 = make_peer(23, 9104, non_byte);
+        let c2 = make_peer(24, 9105, non_byte);
+
+        // First candidate triggers a probe; capture lru and probe_id
+        let eff1 = pm
+            .observe_contact(
+                std::net::SocketAddr::new(c1.ip_address, c1.udp_port),
+                c1.node_id,
+            )
+            .expect("should start a probe for full bucket");
+
+        let (lru, probe_id, bytes) = match eff1 {
+            Effect::StartProbe {
+                lru,
+                candidates,
+                probe_id,
+                bytes,
+            } => {
+                assert_eq!(candidates.len(), 1);
+                (lru, probe_id, bytes)
+            }
+            _ => panic!("expected StartProbe effect"),
+        };
+
+        // Apply effect to record the pending probe
+        pm.apply_effect(Effect::StartProbe {
+            lru,
+            candidates: vec![c1],
+            probe_id,
+            bytes,
+        })
+        .await;
+
+        // Second candidate should coalesce
+        let eff2 = pm.observe_contact(
+            std::net::SocketAddr::new(c2.ip_address, c2.udp_port),
+            c2.node_id,
+        );
+        assert!(eff2.is_none());
+
+        // Act: simulate a Pong from the probed LRU (alive)
+        let pong = Message::Pong {
+            node_id: lru.node_id,
+            probe_id,
+            is_client: false,
+        };
+        let lru_addr = std::net::SocketAddr::new(lru.ip_address, lru.udp_port);
+        let _ = pm.handle_message(pong, lru_addr).await.unwrap();
+
+        // Assert: LRU kept, candidates dropped (not inserted), and no pending probe remains
+        assert!(pm.node.routing_table.contains(lru.node_id));
+        assert!(!pm.node.routing_table.contains(c1.node_id));
+        assert!(!pm.node.routing_table.contains(c2.node_id));
+        assert!(pm.pending_probes.is_empty());
+        assert!(pm.pending_probe_by_lru.is_empty());
     }
 
     #[tokio::test]

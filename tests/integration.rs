@@ -143,7 +143,7 @@ async fn replication_to_k_nodes() -> anyhow::Result<()> {
             }
         }
 
-        let mut expected_set: std::collections::HashSet<NodeID> =
+        let expected_set: std::collections::HashSet<NodeID> =
             expected_topk.iter().copied().collect();
 
         // Include client node's value presence
