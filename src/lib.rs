@@ -7,18 +7,21 @@ mod test_support;
 pub use crate::core::identifier::{Key, NodeID, NodeInfo};
 pub use crate::core::storage::Value;
 
-use tracing_subscriber::{fmt, EnvFilter};
+#[cfg(test)]
 use ctor::ctor;
+#[cfg(test)]
+use tracing_subscriber::{fmt, EnvFilter};
 
+#[cfg(test)]
 #[ctor]
 fn init_tracing() {
-    // Avoid duplicate initialization if multiple tests run in parallel
-    let filter = EnvFilter::try_from_default_env()
-    .unwrap_or_else(|_| EnvFilter::new("info")); // fallback if RUST_LOG unset
+    // set up a logger for tests
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let _ = fmt()
-	.with_env_filter(filter)
-	.with_target(false)
-	.compact()
-	.try_init();
+        .with_env_filter(filter)
+        .with_test_writer() // let libtest capture per-test
+        .with_target(false)
+        .compact()
+        .try_init();
 }

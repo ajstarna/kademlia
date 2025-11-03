@@ -8,9 +8,6 @@ use identifier::{Key, NodeID, NodeInfo};
 use routing_table::RoutingTable;
 use storage::{Storage, Value};
 
-const NUM_BUCKETS: usize = 160; // needs to match SHA1's output length
-const K: usize = 20;
-
 #[derive(Debug)]
 pub struct NodeState {
     pub my_info: NodeInfo,

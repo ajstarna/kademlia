@@ -210,7 +210,7 @@ impl ProtocolManager {
         let port = addr.port();
 
         let node = NodeState::new(k, ip, port);
-	info!("init headless node with {:?}", node);
+        info!("init headless node with {:?}", node);
         Ok(Self {
             node,
             socket,
@@ -239,7 +239,7 @@ impl ProtocolManager {
             node_id,
         };
 
-	debug!("OBSERVING");
+        debug!("OBSERVING");
         loop {
             match self.node.routing_table.try_insert(peer) {
                 InsertResult::SplitOccurred => {
@@ -247,11 +247,11 @@ impl ProtocolManager {
                     // It is possible (though extremely unlikely) that even though we split the leaf bucket,
                     // all existing nodes got moved to the same new bucket, and therefore we need to
                     // continue splitting.
-		    debug!("Split occurred");
+                    debug!("Split occurred");
                     continue;
                 }
                 InsertResult::Full { lru } => {
-		    debug!("Full bucket");
+                    debug!("Full bucket");
                     let probe_id = ProbeID::new_random();
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
@@ -276,9 +276,9 @@ impl ProtocolManager {
                 }
                 // TODO: check if we care about other insert result variants
                 other => {
-		    debug!("insert result = {:?}", other);
-		    break None
-		},
+                    debug!("insert result = {:?}", other);
+                    break None;
+                }
             }
         }
     }
@@ -718,8 +718,14 @@ impl ProtocolManager {
                 } else {
                     // Record the probe so we can resolve it later
                     let deadline = Instant::now() + PROBE_TIMEOUT;
-                    self.pending_probes
-                        .insert(probe_id, PendingProbe { lru, candidates, deadline });
+                    self.pending_probes.insert(
+                        probe_id,
+                        PendingProbe {
+                            lru,
+                            candidates,
+                            deadline,
+                        },
+                    );
                     self.pending_probe_by_lru.insert(lru.node_id, probe_id);
                 }
             }
@@ -1062,7 +1068,11 @@ mod test {
 
         // Determine which first-bit is the non-self bucket
         let self_bit = pm.node.my_info.node_id.get_bit_at(0);
-        let (non_byte, self_byte) = if self_bit == 0 { (0x80, 0x00) } else { (0x00, 0x80) };
+        let (non_byte, self_byte) = if self_bit == 0 {
+            (0x80, 0x00)
+        } else {
+            (0x00, 0x80)
+        };
 
         // Helper to absorb possible splits while inserting directly into the routing table
         let mut insert = |peer: NodeInfo| loop {
@@ -1072,9 +1082,9 @@ mod test {
             }
         };
 
-        // Fill root, then cause a split so we have a non-self bucket
-        let pna = make_peer(10, 9001, non_byte);
-        let pnb = make_peer(11, 9002, non_byte);
+        // Fill root with two distinct peers in the same non-self bucket (same MSB, different lower bits)
+        let pna = make_peer(10, 9001, non_byte | 0x00);
+        let pnb = make_peer(11, 9002, non_byte | 0x01);
         insert(pna);
         insert(pnb);
         // This insert should split the root into self/non-self buckets
@@ -1082,26 +1092,23 @@ mod test {
         insert(ps);
 
         // Now non-self bucket should be full with pna, pnb (K=2).
-        // Try to add two more peers that land in the same non-self bucket.
-        let c1 = make_peer(13, 9004, non_byte);
-        let c2 = make_peer(14, 9005, non_byte);
+        // Try to add two more distinct peers that land in the same non-self bucket.
+        let c1 = make_peer(13, 9004, non_byte | 0x02);
+        let c2 = make_peer(14, 9005, non_byte | 0x03);
 
         // First candidate triggers a probe to the LRU of that bucket
         let eff1 = pm
-            .observe_contact(
-                SocketAddr::new(c1.ip_address, c1.udp_port),
-                c1.node_id,
-            )
+            .observe_contact(SocketAddr::new(c1.ip_address, c1.udp_port), c1.node_id)
             .expect("should start a probe for full bucket");
         // Apply the probe effect so it is recorded as pending
         pm.apply_effect(eff1).await;
 
         // Second candidate should coalesce into the same pending probe (no new effect)
-        let eff2 = pm.observe_contact(
-            SocketAddr::new(c2.ip_address, c2.udp_port),
-            c2.node_id,
+        let eff2 = pm.observe_contact(SocketAddr::new(c2.ip_address, c2.udp_port), c2.node_id);
+        assert!(
+            eff2.is_none(),
+            "second candidate should coalesce into existing probe"
         );
-        assert!(eff2.is_none(), "second candidate should coalesce into existing probe");
 
         // Act: advance time and sweep so the probe times out (evict LRU and insert candidate(s))
         let now = Instant::now() + Duration::from_secs(10);
@@ -1118,18 +1125,26 @@ mod test {
         let mut carried: Vec<NodeInfo> = Vec::new();
         for eff in effects.into_iter() {
             if let Effect::StartProbe {
-                lru: _,
-                candidates,
-                ..
+                lru: _, candidates, ..
             } = eff
             {
                 start_probe_count += 1;
                 carried = candidates;
             }
         }
-        assert_eq!(start_probe_count, 1, "should start exactly one follow-up probe");
-        assert_eq!(carried.len(), 1, "one remaining candidate should be carried");
-        assert_eq!(carried[0].node_id, c2.node_id, "carried candidate should be c2");
+        assert_eq!(
+            start_probe_count, 1,
+            "should start exactly one follow-up probe"
+        );
+        assert_eq!(
+            carried.len(),
+            1,
+            "one remaining candidate should be carried"
+        );
+        assert_eq!(
+            carried[0].node_id, c2.node_id,
+            "carried candidate should be c2"
+        );
     }
 
     #[tokio::test]
@@ -1139,7 +1154,11 @@ mod test {
         let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 2, 1).unwrap();
 
         let self_bit = pm.node.my_info.node_id.get_bit_at(0);
-        let (non_byte, self_byte) = if self_bit == 0 { (0x80, 0x00) } else { (0x00, 0x80) };
+        let (non_byte, self_byte) = if self_bit == 0 {
+            (0x80, 0x00)
+        } else {
+            (0x00, 0x80)
+        };
 
         let mut insert = |peer: NodeInfo| loop {
             match pm.node.routing_table.try_insert(peer) {
@@ -1148,16 +1167,17 @@ mod test {
             }
         };
 
-        let pna = make_peer(20, 9101, non_byte);
-        let pnb = make_peer(21, 9102, non_byte);
+        // Fill root with two distinct peers in the same non-self bucket (same MSB)
+        let pna = make_peer(20, 9101, non_byte | 0x00);
+        let pnb = make_peer(21, 9102, non_byte | 0x01);
         insert(pna);
         insert(pnb);
         let ps = make_peer(22, 9103, self_byte);
         insert(ps);
 
-        // Two candidates arrive targeting the full non-self bucket
-        let c1 = make_peer(23, 9104, non_byte);
-        let c2 = make_peer(24, 9105, non_byte);
+        // Two candidates arrive targeting the full non-self bucket (distinct IDs, same MSB)
+        let c1 = make_peer(23, 9104, non_byte | 0x02);
+        let c2 = make_peer(24, 9105, non_byte | 0x03);
 
         // First candidate triggers a probe; capture lru and probe_id
         let eff1 = pm
