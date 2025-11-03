@@ -275,7 +275,10 @@ impl ProtocolManager {
                     }
                 }
                 // TODO: check if we care about other insert result variants
-                _other => break None,
+                other => {
+		    debug!("insert result = {:?}", other);
+		    break None
+		},
             }
         }
     }
