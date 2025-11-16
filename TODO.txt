@@ -1,4 +1,4 @@
-- improve/more logs?
+- improve/more logs, especially in debug. We should know all messages we are sending and receiving.
 
 - things missing as described in the paper:
     Protocol:
