@@ -10,15 +10,15 @@ use crate::{
     core::storage::Value,
     core::NodeState,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 //use std::time::Instant;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 mod command;
 mod lookup;
 pub use self::command::Command;
-use self::lookup::{Lookup, LookupKind, LookupResult, PendingLookup, LOOKUP_TIMEOUT};
+use self::lookup::{Lookup, LookupKind, PendingLookup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {
@@ -108,9 +108,9 @@ pub struct ProtocolManager {
     rx: Option<mpsc::Receiver<Command>>, // Optional: commands from a library user
     pub k: usize,
     pub alpha: usize, // concurrency parameter
-    pub pending_probes: HashMap<ProbeID, PendingProbe>,
-    pub pending_probe_by_lru: HashMap<NodeID, ProbeID>,
-    pub pending_lookups: HashMap<NodeID, PendingLookup>,
+    pending_probes: HashMap<ProbeID, PendingProbe>,
+    pending_probe_by_lru: HashMap<NodeID, ProbeID>,
+    pending_lookups: HashMap<NodeID, PendingLookup>,
     role: NodeRole,
 }
 
@@ -419,11 +419,8 @@ impl ProtocolManager {
             return Vec::new();
         }
 
-        let deadline = Instant::now() + LOOKUP_TIMEOUT;
-
         let new_pending = PendingLookup {
             lookup,
-            deadline,
             put_value,
             tx_done,
             tx_value,

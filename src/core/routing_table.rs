@@ -39,6 +39,7 @@ impl KBucket {
         self.node_infos.len() >= self.k
     }
 
+    #[allow(dead_code)]
     pub fn try_insert(&mut self, info: NodeInfo) {
         if self.node_infos.len() >= self.k {
             // we should not even be calling this
@@ -375,6 +376,7 @@ impl RoutingTable {
     }
 
     /// return how many leaf k-buckets are store. maximum of 160, but likely far fewer
+    #[allow(dead_code)]
     fn count_buckets(&self) -> usize {
         fn walk(t: &BucketTree) -> usize {
             match t {
@@ -427,7 +429,7 @@ impl RoutingTable {
     ) -> (BucketTree, InsertResult) {
         let result = bucket.upsert(peer);
         match result {
-            InsertResult::Full { lru } => {
+            InsertResult::Full { lru: _ } => {
                 if bucket.covers(my_id) {
                     // split the bucket
                     tracing::debug!("Splitting full bucket that covers self");

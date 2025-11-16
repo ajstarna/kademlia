@@ -45,10 +45,12 @@ impl Storage {
         }
     }
 
+    #[allow(dead_code)]
     pub fn remove(&mut self, key: &Key) -> Option<Value> {
         self.map.remove(key).map(|e| e.value)
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, key: &Key) -> bool {
         match self.map.get(key) {
             Some(entry) if entry.expires_at > Instant::now() => true,

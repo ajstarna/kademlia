@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 
-use crate::core::identifier::{Key, NodeID, NodeInfo};
+use crate::core::identifier::{NodeID, NodeInfo};
 use crate::core::storage::Value;
 
 // Timeouts specific to lookup requests
@@ -15,6 +15,7 @@ pub(super) enum LookupKind {
     Value, // FIND_VALUE
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) enum LookupResult {
     ValueFound(Value),
@@ -161,7 +162,6 @@ impl Lookup {
 #[derive(Debug)]
 pub(super) struct PendingLookup {
     pub(super) lookup: Lookup,
-    pub(super) deadline: Instant,
     pub(super) put_value: Option<Value>,
     pub(super) tx_done: Option<oneshot::Sender<()>>,
     pub(super) tx_value: Option<oneshot::Sender<Option<Value>>>,
