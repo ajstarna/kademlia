@@ -850,6 +850,7 @@ impl ProtocolManager {
     }
 
     /// Listen for messages, user commands, and timeouts in an infinite loop, and respond accordingly.
+    /// This can be considered the "main" method of the running Kademlia node.
     pub async fn run(mut self) {
         let mut buf = [0u8; 1024];
 
@@ -910,8 +911,8 @@ impl ProtocolManager {
                     }
                 },
 
-		// Scheduled timeouts for lookups and stored data.
                 _ = ticker.tick() => {
+                    // Scheduled timeouts for lookups and stored data.
                     let now = Instant::now();
                     let lookup_effects = self.sweep_timeouts_and_topup(now, std::time::Instant::now());
 
