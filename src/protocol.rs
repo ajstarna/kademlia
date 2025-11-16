@@ -623,7 +623,7 @@ impl ProtocolManager {
                         }
                     }
                     // If this was the bootstrap self-lookup (FindNode(self)), refresh all non-self buckets.
-		    // This is the second part of the process of entering the network as described in the paper.
+                    // This is the second part of the process of entering the network as described in the paper.
                     if target == self.node.my_info.node_id {
                         let refresh_targets = self
                             .node
@@ -754,7 +754,11 @@ impl ProtocolManager {
 
     /// check for and resolve expired probes, and check for expired lookups.
     /// Returns any new Effects (probe restarts, lookup top-ups).
-    fn sweep_timeouts_and_topup(&mut self, now: Instant, now_std: std::time::Instant) -> Vec<Effect> {
+    fn sweep_timeouts_and_topup(
+        &mut self,
+        now: Instant,
+        now_std: std::time::Instant,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
 
         // Expired probes: evict LRU and try to insert queued candidates; if still full, start a new probe.
@@ -821,13 +825,15 @@ impl ProtocolManager {
         // Limit the number of refreshes per sweep to avoid bursts.
         let refresh_limit_per_tick = 1usize;
         let ttl = std::time::Duration::from_secs(60 * 60); // 1 hour per Kademlia recommendation
-        let targets = self
-            .node
-            .routing_table
-            .stale_bucket_targets(now_std, ttl, refresh_limit_per_tick);
+        let targets =
+            self.node
+                .routing_table
+                .stale_bucket_targets(now_std, ttl, refresh_limit_per_tick);
         for target in targets.into_iter() {
             // Pre-mark the bucket to avoid immediate rescheduling on next tick
-            self.node.routing_table.mark_bucket_refreshed(target, now_std);
+            self.node
+                .routing_table
+                .mark_bucket_refreshed(target, now_std);
             let initial = self.node.routing_table.k_closest(target);
             let mut effs = self.init_lookup(
                 target,

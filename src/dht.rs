@@ -69,7 +69,11 @@ impl KademliaDHT {
             anyhow::bail!("bootstrap completed but discovered 0 peers; check seeds or network");
         }
 
-        Ok(Self { tx, _local_addr: local_addr, node_info })
+        Ok(Self {
+            tx,
+            _local_addr: local_addr,
+            node_info,
+        })
     }
 
     /// Start a DHT peer (full participant that stores/caches values) bound to a specific address.
@@ -119,8 +123,12 @@ impl KademliaDHT {
             anyhow::bail!("bootstrap completed but discovered 0 peers; check seeds or network");
         }
 
-        Ok(Self { tx, _local_addr: local_addr, node_info })
-}
+        Ok(Self {
+            tx,
+            _local_addr: local_addr,
+            node_info,
+        })
+    }
 
     /// Put a key,value into the DHT. Fire-and-forget best-effort replication.
     pub async fn put(&self, key: Key, value: Value) -> anyhow::Result<()> {

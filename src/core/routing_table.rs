@@ -234,13 +234,7 @@ impl RoutingTable {
     /// At most `limit` targets are returned.
     pub fn stale_bucket_targets(&self, now: Instant, ttl: Duration, limit: usize) -> Vec<NodeID> {
         let mut out = Vec::new();
-        fn walk(
-            t: &BucketTree,
-            now: Instant,
-            ttl: Duration,
-            out: &mut Vec<NodeID>,
-            limit: usize,
-        ) {
+        fn walk(t: &BucketTree, now: Instant, ttl: Duration, out: &mut Vec<NodeID>, limit: usize) {
             if out.len() >= limit {
                 return;
             }
