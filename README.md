@@ -25,14 +25,14 @@ Known, intentional deviations from the paper:
 ## CLI
 
 Subcommands:
-- `peer`: run a long‑lived node (seed or join via bootstrap peers)
+- `peer`: run a long‑lived node (either bootstrap a network ourself or join via known bootstrap nodes)
 - `get`: short‑lived client to fetch a value by key
 - `put` (alias: `store`): short‑lived client to store a value
 
 Run examples (after `cargo build`):
-- Seed on port 8080:
+- Start a bootstrap node on port 8080:
   - `cargo run peer --bind 0.0.0.0:8080`
-- Join via two seeds:
+- Join via two known bootstrap nodes:
   - `cargo run peer --bind 0.0.0.0:0 --bootstrap 127.0.0.1:8080 --bootstrap 127.0.0.1:8081`
 - Put (key omitted = SHA1(value)):
   - Positional: `cargo run put --bootstrap 127.0.0.1:8080 "hello world"`
