@@ -31,16 +31,16 @@ Subcommands:
 
 Run examples (after `cargo build`):
 - Start a bootstrap node on port 8080:
-  - `cargo run peer --bind 0.0.0.0:8080`
+  - `cargo run peer --bind 0.0.0.0:35711`
 - Join via two known bootstrap nodes:
-  - `cargo run peer --bind 0.0.0.0:0 --bootstrap 127.0.0.1:8080 --bootstrap 127.0.0.1:8081`
+  - `cargo run peer --bind 0.0.0.0:0 --bootstrap 127.0.0.1:35711 --bootstrap 127.0.0.1:35713`
 - Put (key omitted = SHA1(value)):
-  - Positional: `cargo run put --bootstrap 127.0.0.1:8080 "hello world"`
-  - With flag: `cargo run put --bootstrap 127.0.0.1:8080 --value "hello world"`
-  - Explicit key: `cargo run put --bootstrap 127.0.0.1:8080 --key 0123...cdef "hello world"`
+  - Positional: `cargo run put --bootstrap 127.0.0.1:35711 "hello world"`
+  - With flag: `cargo run put --bootstrap 127.0.0.1:35711 --value "hello world"`
+  - Explicit key: `cargo run put --bootstrap 127.0.0.1:35711 --key 0123...cdef "hello world"`
   - Note: the put command will print the key that was constructed, which can then be used to run a `get` command to verify the data is now retrievable.
 - Get (40‑hex key, optionally 0x‑prefixed):
-  - `cargo run get --bootstrap 127.0.0.1:8080 0x0123...cdef`
+  - `cargo run get --bootstrap 127.0.0.1:35711 0x0123...cdef`
 
 Flags:
 - Peer: `--bind <ip:port>`, `--bootstrap <ip:port>` (repeatable), `--k <int>`, `--alpha <int>`
@@ -48,9 +48,13 @@ Flags:
 
 Keys are 20 bytes (H160), printed/accepted as 40 hex chars.
 
+
 ## Demo
 
 For a quick multi‑node demo, see `tests/manual/test_network.sh`.
+This script launches several nodes, then `puts` a value into the network, retrieves it via `get`, and confirms
+that we got the same expected value that we put in.
+
 
 ## Library
 

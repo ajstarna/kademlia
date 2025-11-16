@@ -239,7 +239,7 @@ impl ProtocolManager {
             node_id,
         };
 
-        debug!("OBSERVING");
+        debug!(?src_addr, "Observing peer");
         loop {
             match self.node.routing_table.try_insert(peer) {
                 InsertResult::SplitOccurred => {
@@ -658,6 +658,7 @@ impl ProtocolManager {
                 debug!(?key, "FindValue request");
                 // Lookup the value, or return closest nodes if not found
                 if let Some(value) = self.node.get(&key) {
+                    debug!(?value, "We had the requested value.");
                     let found = Message::ValueFound {
                         node_id: self.node.my_info.node_id,
                         key,
@@ -671,6 +672,7 @@ impl ProtocolManager {
                     });
                 } else {
                     // we don't hold the value itself, so we need to check for nodes closer to to the key
+                    debug!("We did not have the value. Return the k closest nodes we know about");
                     let closest = self.node.routing_table.k_closest(key);
                     let nodes = Message::Nodes {
                         node_id: self.node.my_info.node_id,
