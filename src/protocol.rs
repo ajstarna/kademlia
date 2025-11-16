@@ -859,74 +859,73 @@ impl ProtocolManager {
 
         loop {
             tokio::select! {
-                    // message receive arm
-                    result = self.socket.recv_from(&mut buf) =>  {
-                        match result {
+                // message receive arm
+                result = self.socket.recv_from(&mut buf) => {
+                    match result {
                         Ok((len, src_addr)) => {
                             debug!(bytes=len, %src_addr, "UDP recv");
                             let msg = rmp_serde::from_slice::<Message>(&buf[..len]);
                             match msg {
-                            Ok(msg) => {
-                                let effects = self.handle_message(msg, src_addr).await;
-                    if let Ok(effects) = effects {
-                    for eff in effects {
-                        self.apply_effect(eff).await;
-                    }
-                    }
-                            }
-                            Err(e) => {
-                                error!(error=%e.to_string(), "Error decoding message");
-                                continue;
-                            }
+                                Ok(msg) => {
+                                    let effects = self.handle_message(msg, src_addr).await;
+                                    if let Ok(effects) = effects {
+                                        for eff in effects {
+                                            self.apply_effect(eff).await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(error=%e.to_string(), "Error decoding message");
+                                    continue;
+                                }
                             }
                         }
                         Err(e) => {
                             error!(error=%e.to_string(), "Error receiving message");
                             continue;
                         }
-                        }
                     }
+                },
 
-            // See if the user has given us any commands
-                    maybe_command = async {
-                        match self.rx.as_mut() {
-                            Some(rx) => rx.recv().await,
-                            None => std::future::pending::<Option<Command>>().await,  // effectively disable this select arm
-                        }
-                    } => {
-                        match maybe_command {
-                            Some(command) => {
-                                let effects = self.handle_command(command).await;
-                                if let Ok(effects) = effects {
-                                    for eff in effects {
-                                        self.apply_effect(eff).await;
-                                    }
+                // See if the user has given us any commands
+                maybe_command = async {
+                    match self.rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<Command>>().await, // effectively disable this select arm
+                    }
+                } => {
+                    match maybe_command {
+                        Some(command) => {
+                            let effects = self.handle_command(command).await;
+                            if let Ok(effects) = effects {
+                                for eff in effects {
+                                    self.apply_effect(eff).await;
                                 }
                             }
-                            None => {
-                                // Command channel closed; disable commands and continue headless.
-                                self.rx = None;
-                            }
+                        }
+                        None => {
+                            // Command channel closed; disable commands and continue headless.
+                            self.rx = None;
                         }
                     }
+                },
 
+		// Scheduled timeouts for lookups and stored data.
+                _ = ticker.tick() => {
+                    let now = Instant::now();
+                    let lookup_effects = self.sweep_timeouts_and_topup(now, std::time::Instant::now());
 
-                    _ = ticker.tick() => {
-                        let now = Instant::now();
-                        let lookup_effects = self.sweep_timeouts_and_topup(now, std::time::Instant::now());
-
-                        for eff in lookup_effects {
-                self.apply_effect(eff).await;
-                        }
-
-                        // Periodically purge expired local key/value entries (throttled)
-                        if now.duration_since(last_storage_purge) >= Duration::from_secs(5) {
-                            self.node.purge_expired();
-                            last_storage_purge = now;
-                        }
-
+                    for eff in lookup_effects {
+                        self.apply_effect(eff).await;
                     }
+
+                    // Periodically purge expired local key/value entries (throttled)
+                    if now.duration_since(last_storage_purge) >= Duration::from_secs(5) {
+                        self.node.purge_expired();
+                        last_storage_purge = now;
                     }
+                },
+            }
         }
     }
 }
