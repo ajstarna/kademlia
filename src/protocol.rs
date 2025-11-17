@@ -732,6 +732,16 @@ impl ProtocolManager {
                     if let LookupKind::Value = pending_lookup.lookup.kind {
                         if let Some(best) = pending_lookup.lookup.best_non_holder() {
                             let ttl_secs = self.cache_ttl_secs_for(key, &best);
+                            let lz = best.node_id.distance(&key).leading_zeros();
+                            debug!(
+                                event = "cache_schedule",
+                                ?key,
+                                target_node = ?best.node_id,
+                                lz,
+                                ttl_secs,
+                                addr = %SocketAddr::new(best.ip_address, best.udp_port),
+                                "Scheduling cache Store to closest non-holder"
+                            );
                             let store = Message::Store {
                                 node_id: self.node.my_info.node_id,
                                 key,
@@ -745,6 +755,13 @@ impl ProtocolManager {
                                     bytes,
                                 });
                             }
+                        } else {
+                            debug!(
+                                event = "cache_skip",
+                                ?key,
+                                reason = "no_non_holders",
+                                "No non-holder responders recorded; skipping cache"
+                            );
                         }
                     }
 
