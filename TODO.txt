@@ -1,7 +1,6 @@
 - things missing as described in the paper:
     Protocol:
     - optional "ping piggy back"
-    - nodes that fail to respond during a lookup process are removed until they respond
 
     Routing Table:
     - special rule about sometimes keeping more than k contacts (see routing paper section for details)

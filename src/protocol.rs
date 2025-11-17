@@ -2103,6 +2103,170 @@ mod test {
         // Put is fire-and-forget; no ack to await
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_late_nodes_reply_is_accepted() {
+        // Arrange alpha=1 so a single in-flight; two initial peers p1, p2
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 1).unwrap();
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let key: Key = NodeID(target.0);
+        let p1 = make_peer(1, 9601, 0x10);
+        let p2 = make_peer(2, 9602, 0x08);
+        let p3 = make_peer(3, 9603, 0x00); // to be introduced by p1
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
+
+        // Start a Get and capture rpc_id sent to the first queried peer (could be p1 or p2)
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let effects = pm
+            .handle_command(Command::Get { key, tx_value: tx })
+            .await
+            .unwrap();
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
+        let mut responder_addr: Option<SocketAddr> = None;
+        let mut responder_node: Option<NodeID> = None;
+        let mut responder_rpc: Option<RpcId> = None;
+        for eff in effects {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(Message::FindValue { rpc_id, .. }) =
+                    rmp_serde::from_slice::<Message>(&bytes)
+                {
+                    if addr == p1_addr {
+                        responder_addr = Some(p1_addr);
+                        responder_node = Some(p1.node_id);
+                        responder_rpc = Some(rpc_id);
+                    } else if addr == p2_addr {
+                        responder_addr = Some(p2_addr);
+                        responder_node = Some(p2.node_id);
+                        responder_rpc = Some(rpc_id);
+                    }
+                }
+            }
+        }
+        let responder_addr = responder_addr.expect("initial FindValue should target a known peer");
+        let responder_node = responder_node.unwrap();
+        let responder_rpc = responder_rpc.expect("initial FindValue should carry rpc_id");
+
+        // Timeout p1 and top up to p2
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let now = Instant::now();
+        let _ = pm.sweep_timeouts_and_topup(now, std::time::Instant::now());
+        // Assert responder is no longer in_flight for this lookup
+        let pl = pm
+            .pending_lookups
+            .get(&key)
+            .expect("lookup should still be active before late reply");
+        assert!(
+            !pl.lookup.in_flight.contains_key(&responder_node),
+            "timed-out responder should be removed from in_flight"
+        );
+
+        // Late Nodes from p1 should be accepted (rpc_id matches) and p3 observed
+        let nodes_from_p1 = Message::Nodes {
+            node_id: responder_node,
+            target,
+            rpc_id: responder_rpc,
+            nodes: vec![p3],
+            is_client: false,
+        };
+        let effects = pm
+            .handle_message(nodes_from_p1, responder_addr)
+            .await
+            .expect("handle nodes");
+
+        assert!(
+            pm.node.routing_table.contains(p3.node_id),
+            "late Nodes should be accepted while lookup active"
+        );
+
+        // Since alpha=1 and another peer should be in-flight, top-up should not emit new FindValue
+        let mut saw_findvalue = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { bytes, .. } = eff {
+                if let Ok(Message::FindValue { .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                    saw_findvalue = true;
+                }
+            }
+        }
+        assert!(!saw_findvalue, "no new FindValue should be sent when alpha is full");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_late_valuefound_is_accepted() {
+        // Arrange alpha=1; two peers, p1 will time out but later return the value
+        let dummy_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm: ProtocolManager = ProtocolManager::new_headless(dummy_socket, 20, 1).unwrap();
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let key: Key = NodeID(target.0);
+        let p1 = make_peer(1, 9701, 0x10);
+        let p2 = make_peer(2, 9702, 0x08);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
+
+        // Start a Get and capture rpc_id to first queried peer (could be p1 or p2)
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let effects = pm
+            .handle_command(Command::Get { key, tx_value: tx })
+            .await
+            .unwrap();
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
+        let mut responder_addr: Option<SocketAddr> = None;
+        let mut responder_node: Option<NodeID> = None;
+        let mut responder_rpc: Option<RpcId> = None;
+        for eff in effects {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(Message::FindValue { rpc_id, .. }) =
+                    rmp_serde::from_slice::<Message>(&bytes)
+                {
+                    if addr == p1_addr {
+                        responder_addr = Some(p1_addr);
+                        responder_node = Some(p1.node_id);
+                        responder_rpc = Some(rpc_id);
+                    } else if addr == p2_addr {
+                        responder_addr = Some(p2_addr);
+                        responder_node = Some(p2.node_id);
+                        responder_rpc = Some(rpc_id);
+                    }
+                }
+            }
+        }
+        let responder_addr = responder_addr.expect("initial FindValue should target a known peer");
+        let responder_node = responder_node.unwrap();
+        let responder_rpc = responder_rpc.expect("initial FindValue should carry rpc_id");
+
+        // Timeout p1 and top up
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let now = Instant::now();
+        let _ = pm.sweep_timeouts_and_topup(now, std::time::Instant::now());
+        // Assert responder is no longer in_flight for this lookup
+        let pl = pm
+            .pending_lookups
+            .get(&key)
+            .expect("lookup should still be active before late reply");
+        assert!(
+            !pl.lookup.in_flight.contains_key(&responder_node),
+            "timed-out responder should be removed from in_flight"
+        );
+
+        // Late ValueFound from the original responder with matching rpc_id should complete lookup
+        let value = b"late-hello".to_vec();
+        let found = Message::ValueFound {
+            node_id: responder_node,
+            key,
+            rpc_id: responder_rpc,
+            value: value.clone(),
+            is_client: false,
+        };
+        let _ = pm.handle_message(found, responder_addr).await.unwrap();
+
+        assert!(pm.pending_lookups.get(&key).is_none(), "lookup should finish");
+        assert_eq!(pm.node.get(&key), Some(&value), "value cached locally");
+    }
+
     #[tokio::test]
     async fn test_bucket_refresh_triggers_lookup() {
         // Arrange: headless PM with some peers in the routing table so refresh has initial candidates
