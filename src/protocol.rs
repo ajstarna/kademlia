@@ -119,6 +119,8 @@ pending_probes: HashMap<RpcId, PendingProbe>,
 pending_probe_by_lru: HashMap<NodeID, RpcId>,
     pending_lookups: HashMap<NodeID, PendingLookup>,
     role: NodeRole,
+    // For bootstrap self-lookup: track rpc_id by seed address for initial FindNode(self) sends
+    pending_bootstrap: HashMap<SocketAddr, RpcId>,
 }
 
 impl ProtocolManager {
@@ -146,6 +148,7 @@ impl ProtocolManager {
             pending_probe_by_lru: HashMap::new(),
             pending_lookups,
             role: NodeRole::Peer,
+            pending_bootstrap: HashMap::new(),
         })
     }
 
@@ -228,6 +231,7 @@ impl ProtocolManager {
             pending_probe_by_lru: HashMap::new(),
             pending_lookups: HashMap::new(),
             role: NodeRole::Peer,
+            pending_bootstrap: HashMap::new(),
         })
     }
 
@@ -337,19 +341,18 @@ impl ProtocolManager {
                     /*early_complete_on_empty=*/ false,
                 );
 
-                // Send initial FindNode(self) to the seed addresses
-                let query = Message::FindNode {
-                    node_id: my_id,
-                    target: my_id,
-                    rpc_id: RpcId::new_random(),
-                    is_client: self.is_client(),
-                };
-                let bytes = rmp_serde::to_vec(&query)?;
+                // Send initial FindNode(self) to the seed addresses, tracking rpc_id per address
                 for addr in addrs {
-                    effs.push(Effect::Send {
-                        addr,
-                        bytes: bytes.clone(),
-                    });
+                    let rpc_id = RpcId::new_random();
+                    let query = Message::FindNode {
+                        node_id: my_id,
+                        target: my_id,
+                        rpc_id,
+                        is_client: self.is_client(),
+                    };
+                    let bytes = rmp_serde::to_vec(&query)?;
+                    self.pending_bootstrap.insert(addr, rpc_id);
+                    effs.push(Effect::Send { addr, bytes });
                 }
                 effs
             }
@@ -583,93 +586,75 @@ impl ProtocolManager {
 
             Message::Nodes { node_id, target, rpc_id, nodes, is_client } => {
                 debug!(?target, ?rpc_id, count=%nodes.len(), "Received Nodes");
-                // observe all the new nodes we just learned about
-                for n in &nodes {
-                    if let Some(eff) =
-                        self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id)
-                    {
-                        effects.push(eff);
-                    }
-                }
-
                 let mut remove_lookup: bool = false; // remove if there are no more in-flight requests
                 let i_am_client = self.is_client();
-                if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
-                    // Validate rpc_id matches what we have in-flight for this responder
-                    if let Some((expected_rpc, _deadline)) =
-                        pending_lookup.lookup.in_flight.get(&node_id).cloned()
-                    {
-                        if expected_rpc != rpc_id {
-                            warn!(
-                                event = "rpc_mismatch_nodes",
-                                ?target,
-                                responder = ?node_id,
-                                expected = ?expected_rpc,
-                                got = ?rpc_id,
-                                "Dropping Nodes due to rpc_id mismatch"
-                            );
-                            return Ok(effects);
+                // Validate rpc_id using immutable borrow
+                let mut valid = false;
+                if let Some(pl) = self.pending_lookups.get(&target) {
+                    valid = pl.lookup.validate_nodes_reply(node_id, rpc_id);
+                }
+                if !valid && target == self.node.my_info.node_id {
+                    // Bootstrap special-case: accept Nodes if rpc_id matches what we sent to this addr
+                    if let Some(expected) = self.pending_bootstrap.get(&src_addr).copied() {
+                        if expected == rpc_id {
+                            valid = true;
+                            // one-shot: clear tracking for this addr
+                            self.pending_bootstrap.remove(&src_addr);
                         }
-                    } else {
-                        warn!(
-                            event = "rpc_unknown_nodes",
-                            ?target,
-                            responder = ?node_id,
-                            "Dropping Nodes with no matching in-flight request"
-                        );
-                        return Ok(effects);
                     }
-                    // If this was a Value lookup, record the responder as a non-holder
-                    if let LookupKind::Value = pending_lookup.lookup.kind {
+                }
+                if valid {
+                    // Observe contacts after validation
+                    for n in &nodes {
+                        if let Some(eff) =
+                            self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id)
+                        {
+                            effects.push(eff);
+                        }
+                    }
+                    // Mutably update the lookup state using Lookup API
+                    if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
                         let responder = NodeInfo {
                             ip_address: src_addr.ip(),
                             udp_port: src_addr.port(),
                             node_id,
                         };
-                        pending_lookup.lookup.record_non_holder(responder);
-                    }
-                    pending_lookup.lookup.in_flight.remove(&node_id);
-                    pending_lookup.lookup.merge_new_nodes(nodes);
-
-                    let lookup_effects = pending_lookup.lookup.top_up_alpha_requests();
-                    effects.extend(lookup_effects);
-
-                    debug!(in_flight=?pending_lookup.lookup.in_flight, "In Flight");
-
-                    if pending_lookup.lookup.is_finished() {
-                        info!(?target, "Lookup completed with nodes");
-                        // If this lookup was initiated by a Put, we send the Store messages now
-                        if let Some(value) = pending_lookup.put_value.as_ref() {
-                            let nodes_to_store = pending_lookup.lookup.short_list.clone();
-                            info!(?nodes_to_store, "Nodes to store.");
-                            for n in nodes_to_store.iter().cloned() {
-                                let store = Message::Store {
-                                    node_id: self.node.my_info.node_id,
-                                    key: target,
-                                    value: value.clone(),
-                                    ttl_secs: DEFAULT_STORE_TTL_SECS,
-                                    is_client: i_am_client,
-                                };
-                                let bytes = rmp_serde::to_vec(&store)?;
-                                effects.push(Effect::Send {
-                                    addr: SocketAddr::new(n.ip_address, n.udp_port),
-                                    bytes,
-                                });
-                            }
-                            if !i_am_client {
-                                // check if we are closer than the furthest node that stored this value.
-                                // if so, then we should also store the value (it is ok if k+1 nodes store)
-                                let my_dist = self.node.my_info.node_id.distance(&target);
-                                let max_peer_dist = nodes_to_store
-                                    .iter()
-                                    .map(|n| n.node_id.distance(&target))
-                                    .max();
-                                if max_peer_dist.map_or(true, |d| my_dist <= d) {
-                                    self.node.store(target, value.clone());
+                        let lookup_effects =
+                            pending_lookup.lookup.apply_nodes_reply(responder, nodes);
+                        effects.extend(lookup_effects);
+                        debug!(in_flight=?pending_lookup.lookup.in_flight, "In Flight");
+                        if pending_lookup.lookup.is_finished() {
+                            info!(?target, "Lookup completed with nodes");
+                            if let Some(value) = pending_lookup.put_value.as_ref() {
+                                let nodes_to_store = pending_lookup.lookup.short_list.clone();
+                                info!(?nodes_to_store, "Nodes to store.");
+                                for n in nodes_to_store.iter().cloned() {
+                                    let store = Message::Store {
+                                        node_id: self.node.my_info.node_id,
+                                        key: target,
+                                        value: value.clone(),
+                                        ttl_secs: DEFAULT_STORE_TTL_SECS,
+                                        is_client: i_am_client,
+                                    };
+                                    let bytes = rmp_serde::to_vec(&store)?;
+                                    effects.push(Effect::Send {
+                                        addr: SocketAddr::new(n.ip_address, n.udp_port),
+                                        bytes,
+                                    });
+                                }
+                                if !i_am_client {
+                                    let my_dist = self.node.my_info.node_id.distance(&target);
+                                    let max_peer_dist = nodes_to_store
+                                        .iter()
+                                        .map(|n| n.node_id.distance(&target))
+                                        .max();
+                                    if max_peer_dist.map_or(true, |d| my_dist <= d) {
+                                        self.node.store(target, value.clone());
+                                    }
                                 }
                             }
+                            remove_lookup = true;
                         }
-                        remove_lookup = true;
                     }
                 } else {
                     // we got a nodes message with no corresponding lookup... curious.
@@ -748,31 +733,20 @@ impl ProtocolManager {
             }
             Message::ValueFound { node_id, key, rpc_id, value, is_client } => {
                 debug!(key=?key, ?rpc_id, value_len=%value.len(), "Received ValueFound");
-                // Validate rpc_id against the in-flight request for this responder
-                if let Some(pending_lookup) = self.pending_lookups.get_mut(&key) {
-                    if let Some((expected_rpc, _deadline)) =
-                        pending_lookup.lookup.in_flight.get(&node_id).cloned()
-                    {
-                        if expected_rpc != rpc_id {
-                            warn!(
-                                event = "rpc_mismatch_value",
-                                ?key,
-                                responder = ?node_id,
-                                expected = ?expected_rpc,
-                                got = ?rpc_id,
-                                "Dropping ValueFound due to rpc_id mismatch"
-                            );
-                            return Ok(effects);
-                        }
-                    } else {
-                        warn!(
-                            event = "rpc_unknown_value",
-                            ?key,
-                            responder = ?node_id,
-                            "Dropping ValueFound with no matching in-flight request"
-                        );
-                        return Ok(effects);
-                    }
+                // Validate via Lookup API before mutating state
+                let valid = match self.pending_lookups.get(&key) {
+                    Some(pl) => pl.lookup.validate_value_reply(node_id, rpc_id),
+                    None => false,
+                };
+                if !valid {
+                    warn!(
+                        event = "rpc_invalid_value",
+                        ?key,
+                        responder = ?node_id,
+                        ?rpc_id,
+                        "Dropping ValueFound due to missing/mismatched rpc_id"
+                    );
+                    return Ok(effects);
                 }
                 debug!(event="rpc_ok_value", ?key, responder=?node_id, ?rpc_id, "Accepted ValueFound reply");
                 if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
@@ -1074,6 +1048,84 @@ mod test {
     use crate::core::routing_table::InsertResult;
     use crate::test_support::test_support::{id_with_first_byte, make_peer};
 
+    #[tokio::test]
+    async fn test_pong_with_unknown_rpc_is_ignored() {
+        let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm = ProtocolManager::new_headless(dummy_socket, 20, 1).unwrap();
+
+        let bogus = NodeID::new();
+        let rpc = RpcId::new_random();
+        let msg = Message::Pong {
+            node_id: bogus,
+            rpc_id: rpc,
+            is_client: false,
+        };
+        let src: SocketAddr = "127.0.0.1:4010".parse().unwrap();
+        let effects = pm.handle_message(msg, src).await.unwrap();
+
+        // No effects and the bogus peer was not observed/added
+        assert!(effects.is_empty());
+        assert!(pm.node.routing_table.find(bogus).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_nodes_with_mismatched_rpc_is_dropped() {
+        // Arrange a simple lookup with one initial peer
+        let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm = ProtocolManager::new_headless(dummy_socket, 20, 1).unwrap();
+
+        let target: NodeID = id_with_first_byte(0x00);
+        let key: Key = NodeID(target.0);
+        let p1 = make_peer(1, 9501, 0x00);
+        let p_new = make_peer(2, 9502, 0x10);
+        let _ = pm.node.routing_table.insert(p1);
+
+        // Start lookup and capture initial FindValue rpc_id to p1
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
+        let effects = pm
+            .handle_command(Command::Get { key, tx_value: tx })
+            .await
+            .unwrap();
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let mut rpc_to_p1: Option<RpcId> = None;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == p1_addr {
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
+                        rpc_to_p1 = Some(rpc_id);
+                    }
+                }
+            }
+        }
+        assert!(rpc_to_p1.is_some(), "should send FindValue to p1");
+
+        // Send a Nodes reply with a mismatched rpc_id; it should be dropped fully
+        let nodes_msg = Message::Nodes {
+            node_id: p1.node_id,
+            target,
+            rpc_id: RpcId::new_random(), // mismatch
+            nodes: vec![p_new],
+            is_client: false,
+        };
+        let effects = pm
+            .handle_message(nodes_msg, p1_addr)
+            .await
+            .unwrap();
+
+        // No follow-up FindValue, and p_new was not observed/added
+        let mut saw_followup = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { bytes, .. } = eff {
+                if let Ok(Message::FindValue { .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                    saw_followup = true;
+                }
+            }
+        }
+        assert!(!saw_followup, "should not top-up on mismatched Nodes");
+        assert!(pm.node.routing_table.find(p_new.node_id).is_none());
+    }
     #[tokio::test]
     async fn test_receive_ping() {
         let dummy_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // ephemeral port
@@ -1809,18 +1861,18 @@ mod test {
         let mut initial_sends: Vec<SocketAddr> = Vec::new();
         let mut rpc_p1: Option<RpcId> = None;
         let mut rpc_p2: Option<RpcId> = None;
-        for eff in effects.clone().into_iter() {
+        for eff in &effects {
             if let Effect::Send { addr, bytes } = eff {
                 if let Ok(Message::FindNode { rpc_id, .. }) =
                     rmp_serde::from_slice::<Message>(&bytes)
                 {
-                    if addr == SocketAddr::new(p1.ip_address, p1.udp_port) {
+                    if *addr == SocketAddr::new(p1.ip_address, p1.udp_port) {
                         rpc_p1 = Some(rpc_id);
                     }
-                    if addr == SocketAddr::new(p2.ip_address, p2.udp_port) {
+                    if *addr == SocketAddr::new(p2.ip_address, p2.udp_port) {
                         rpc_p2 = Some(rpc_id);
                     }
-                    initial_sends.push(addr);
+                    initial_sends.push(*addr);
                 }
             }
         }
@@ -1947,19 +1999,19 @@ mod test {
         let mut findnode_dests = Vec::new();
         let mut rpc_p1: Option<RpcId> = None;
         let mut rpc_p2: Option<RpcId> = None;
-        for eff in effects.clone().into_iter() {
+        for eff in &effects {
             if let Effect::Send { addr, bytes } = eff {
                 if let Ok(Message::FindNode { rpc_id, .. }) =
                     rmp_serde::from_slice::<Message>(&bytes)
                 {
-                    if addr == std::net::SocketAddr::new(p1.ip_address, p1.udp_port) {
+                    if *addr == std::net::SocketAddr::new(p1.ip_address, p1.udp_port) {
                         rpc_p1 = Some(rpc_id);
-                    } else if addr
+                    } else if *addr
                         == std::net::SocketAddr::new(p2.ip_address, p2.udp_port)
                     {
                         rpc_p2 = Some(rpc_id);
                     }
-                    findnode_dests.push(addr);
+                    findnode_dests.push(*addr);
                 }
             }
         }
