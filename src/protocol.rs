@@ -12,7 +12,7 @@ use crate::{
 };
 use std::collections::HashMap;
 //use std::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 // Default TTL for value storage (24 hours) in seconds
@@ -734,20 +734,30 @@ impl ProtocolManager {
             Message::ValueFound { node_id, key, rpc_id, value, is_client } => {
                 debug!(key=?key, ?rpc_id, value_len=%value.len(), "Received ValueFound");
                 // Validate via Lookup API before mutating state
-                let valid = match self.pending_lookups.get(&key) {
-                    Some(pl) => pl.lookup.validate_value_reply(node_id, rpc_id),
-                    None => false,
-                };
-                if !valid {
-                    warn!(
-                        event = "rpc_invalid_value",
+		if let Some(pl) = self.pending_lookups.get(&key) {
+		    if !pl.lookup.validate_value_reply(node_id, rpc_id) {
+			// An invalid rpc id indicates possible spoofing.
+			warn!(
+                            event = "rpc_invalid_value",
+                            ?key,
+                            responder = ?node_id,
+                            ?rpc_id,
+                            "Dropping ValueFound due to mismatched rpc_id"
+			);
+			return Ok(effects);
+		    }
+		} else {
+		    // A missing pending_lookup could just mean that we already got the value from another node
+		    debug!(
+                        event = "missing_pending_lookup",
                         ?key,
                         responder = ?node_id,
                         ?rpc_id,
-                        "Dropping ValueFound due to missing/mismatched rpc_id"
-                    );
-                    return Ok(effects);
-                }
+                        "ValueFound message does not correspond to an existing pending lookup. We likely already received the value "
+		    );
+		    return Ok(effects);
+		}
+
                 debug!(event="rpc_ok_value", ?key, responder=?node_id, ?rpc_id, "Accepted ValueFound reply");
                 if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
@@ -975,7 +985,7 @@ impl ProtocolManager {
                 result = self.socket.recv_from(&mut buf) => {
                     match result {
                         Ok((len, src_addr)) => {
-                            debug!(bytes=len, %src_addr, "UDP recv");
+                            trace!(bytes=len, %src_addr, "UDP recv");
                             let msg = rmp_serde::from_slice::<Message>(&buf[..len]);
                             match msg {
                                 Ok(msg) => {
