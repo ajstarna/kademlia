@@ -5,9 +5,6 @@
     - echo RPC random ID to help with address forgery
     - optional "ping piggy back"
     - nodes that fail to respond during a lookup process are removed until they respond
-    - for caching purposes, once a value lookup suceeds, the requesting node stores the (k, v)
-      at the closest node it observed to the key that did not return the value.
-        - To avoid over caching, inversely proportional TTL (see paper for details)
 
     Routing Table:
     - special rule about sometimes keeping more than k contacts (see routing paper section for details)
@@ -21,5 +18,3 @@
 
 - how to test at scale and in a real network setting?
    - if we mock udp we could test large scale locally. simulate a network with flakiness
-
-- test with someone across the internet

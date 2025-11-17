@@ -728,7 +728,8 @@ impl ProtocolManager {
                     // we drop the lookup entirely once we get back the value
                     info!(?key, ?node_id, "Lookup completed with value");
 
-                    // On successful value lookup, cache remotely at the closest non-holder (if any)
+                    // On successful value lookup, cache the value at the closest non-holder (if any).
+		    // This helps currently important values return sooner next time someone looks it up.
                     if let LookupKind::Value = pending_lookup.lookup.kind {
                         if let Some(best) = pending_lookup.lookup.best_non_holder() {
                             let ttl_secs = self.cache_ttl_secs_for(key, &best);
