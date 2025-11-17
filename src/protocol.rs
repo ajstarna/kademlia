@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+// Default TTL for value storage (24 hours) in seconds
+const DEFAULT_STORE_TTL_SECS: u64 = 24 * 60 * 60;
 mod command;
 mod lookup;
 pub use self::command::Command;
@@ -45,6 +47,7 @@ enum Message {
         node_id: NodeID,
         key: Key,
         value: Value,
+        ttl_secs: u64,
         is_client: bool,
     },
     FindNode {
@@ -222,6 +225,23 @@ impl ProtocolManager {
             pending_lookups: HashMap::new(),
             role: NodeRole::Peer,
         })
+    }
+
+    /// Inverse-distance TTL based on leading zero bits of XOR distance
+    /// Useful when caching a value on the nearest node that did not return a requested value
+    /// during a lookup, as specified in the paper.
+    /// Note: the paper does not give an exact formula.
+    fn cache_ttl_secs_for(&self, key: NodeID, node: &NodeInfo) -> u64 {
+        const BITS: f64 = 160.0;
+        const MIN_TTL_SECS: f64 = (15 * 60) as f64; // 15 minutes
+        const MAX_TTL_SECS: f64 = DEFAULT_STORE_TTL_SECS as f64; // 24 hours
+        const GAMMA: f64 = 2.0; // shape parameter
+
+        let dist = node.node_id.distance(&key);
+        let lz = dist.leading_zeros() as f64;
+        let f = (lz / BITS).clamp(0.0, 1.0);
+        let ttl = MIN_TTL_SECS + (MAX_TTL_SECS - MIN_TTL_SECS) * f.powf(GAMMA);
+        ttl.round() as u64
     }
 
     pub fn is_client(&self) -> bool {
@@ -516,11 +536,13 @@ impl ProtocolManager {
                 node_id,
                 key,
                 value,
+                ttl_secs,
                 is_client,
             } => {
                 debug!(?key, value_len=?value.len(), "Store request");
                 if !self.is_client() {
-                    self.node.store(key, value);
+                    let ttl = std::time::Duration::from_secs(ttl_secs);
+                    self.node.store_with_ttl(key, value, ttl);
                 }
                 (node_id, is_client)
             }
@@ -566,6 +588,15 @@ impl ProtocolManager {
                 let mut remove_lookup: bool = false; // remove if there are no more in-flight requests
                 let i_am_client = self.is_client();
                 if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
+                    // If this was a Value lookup, record the responder as a non-holder
+                    if let LookupKind::Value = pending_lookup.lookup.kind {
+                        let responder = NodeInfo {
+                            ip_address: src_addr.ip(),
+                            udp_port: src_addr.port(),
+                            node_id,
+                        };
+                        pending_lookup.lookup.record_non_holder(responder);
+                    }
                     pending_lookup.lookup.in_flight.remove(&node_id);
                     pending_lookup.lookup.merge_new_nodes(nodes);
 
@@ -585,6 +616,7 @@ impl ProtocolManager {
                                     node_id: self.node.my_info.node_id,
                                     key: target,
                                     value: value.clone(),
+                                    ttl_secs: DEFAULT_STORE_TTL_SECS,
                                     is_client: i_am_client,
                                 };
                                 let bytes = rmp_serde::to_vec(&store)?;
@@ -695,6 +727,26 @@ impl ProtocolManager {
                 if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
                     info!(?key, ?node_id, "Lookup completed with value");
+
+                    // On successful value lookup, cache remotely at the closest non-holder (if any)
+                    if let LookupKind::Value = pending_lookup.lookup.kind {
+                        if let Some(best) = pending_lookup.lookup.best_non_holder() {
+                            let ttl_secs = self.cache_ttl_secs_for(key, &best);
+                            let store = Message::Store {
+                                node_id: self.node.my_info.node_id,
+                                key,
+                                value: value.clone(),
+                                ttl_secs,
+                                is_client: self.is_client(),
+                            };
+                            if let Ok(bytes) = rmp_serde::to_vec(&store) {
+                                effects.push(Effect::Send {
+                                    addr: SocketAddr::new(best.ip_address, best.udp_port),
+                                    bytes,
+                                });
+                            }
+                        }
+                    }
 
                     // Send the found value back to the user
                     if let Some(tx) = pending_lookup.tx_value.take() {
@@ -988,6 +1040,7 @@ mod test {
             node_id: src_id,
             key: key.clone(),
             value: value.clone(),
+            ttl_secs: DEFAULT_STORE_TTL_SECS,
             is_client: false,
         };
 
@@ -1926,5 +1979,113 @@ mod test {
             !pm.pending_lookups.is_empty(),
             "refresh should register a pending lookup"
         );
+    }
+
+    #[tokio::test]
+    async fn test_remote_cache_to_closest_non_holder() {
+        let req_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm_req: ProtocolManager = ProtocolManager::new_headless(req_socket, 20, 1).unwrap();
+
+        // Choose a key and value
+        let key: Key = NodeID::from_hashed(&"cache-key");
+        let value: Value = b"cached-value".to_vec();
+
+        // Create a non-holder peer that will respond with Nodes, and a provider peer that returns the value
+        // Make the non-holder appear close to the key by matching the first byte
+        let first_byte = key.0.to_fixed_bytes()[0];
+        let p_nonholder = make_peer(41, 9501, first_byte);
+        let p_provider = make_peer(42, 9502, first_byte ^ 0x01);
+
+        // Insert the non-holder into the routing table (absorb possible splits)
+        let mut insert = |peer: NodeInfo| loop {
+            match pm_req.node.routing_table.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                _ => break,
+            }
+        };
+        insert(p_nonholder);
+
+        // Act 1: start a Get lookup
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let effects = pm_req
+            .handle_command(Command::Get { key, tx_value: tx })
+            .await
+            .unwrap();
+
+        // Expect an initial FindValue to the non-holder
+        let mut sent_to_nonholder = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == std::net::SocketAddr::new(p_nonholder.ip_address, p_nonholder.udp_port) {
+                    if let Ok(Message::FindValue { .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                        sent_to_nonholder = true;
+                    }
+                }
+            }
+        }
+        assert!(sent_to_nonholder, "lookup should start by querying the non-holder");
+
+        // Act 2: non-holder responds with Nodes introducing the provider; this also records non-holder
+        let nodes_from_nonholder = Message::Nodes {
+            node_id: p_nonholder.node_id,
+            target: key,
+            nodes: vec![p_provider],
+            is_client: false,
+        };
+        let nh_addr = std::net::SocketAddr::new(p_nonholder.ip_address, p_nonholder.udp_port);
+        let effects = pm_req.handle_message(nodes_from_nonholder, nh_addr).await.unwrap();
+
+        // Expect a FindValue to the provider now
+        let mut sent_to_provider = false;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == std::net::SocketAddr::new(p_provider.ip_address, p_provider.udp_port) {
+                    if let Ok(Message::FindValue { .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                        sent_to_provider = true;
+                    }
+                }
+            }
+        }
+        assert!(sent_to_provider, "Nodes reply should trigger query to provider");
+
+        // Act 3: provider replies with ValueFound
+        let found = Message::ValueFound {
+            node_id: p_provider.node_id,
+            key,
+            value: value.clone(),
+            is_client: false,
+        };
+        let prov_addr = std::net::SocketAddr::new(p_provider.ip_address, p_provider.udp_port);
+        let effects = pm_req.handle_message(found, prov_addr).await.unwrap();
+
+        // Expect a Store to be sent to the closest non-holder (p_nonholder)
+        let mut store_bytes: Option<Vec<u8>> = None;
+        let mut store_dest: Option<std::net::SocketAddr> = None;
+        for eff in effects.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(Message::Store { key: k, value: v, .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                    assert_eq!(k, key);
+                    assert_eq!(v, value);
+                    store_bytes = Some(bytes);
+                    store_dest = Some(addr);
+                    break;
+                }
+            }
+        }
+        let store_dest = store_dest.expect("should have sent a Store to cache node");
+        assert_eq!(
+            store_dest,
+            std::net::SocketAddr::new(p_nonholder.ip_address, p_nonholder.udp_port),
+            "Store should target the closest non-holder"
+        );
+
+        // Apply the Store to a separate ProtocolManager representing the non-holder and verify it stored the value
+        let cache_socket: UdpSocket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut pm_cache = ProtocolManager::new_headless(cache_socket, 20, 1).unwrap();
+        let store_msg: Message = rmp_serde::from_slice(&store_bytes.unwrap()).unwrap();
+        let src = "127.0.0.1:9999".parse().unwrap();
+        let _ = pm_cache.handle_message(store_msg, src).await.unwrap();
+
+        assert_eq!(pm_cache.node.get(&key), Some(&value));
     }
 }

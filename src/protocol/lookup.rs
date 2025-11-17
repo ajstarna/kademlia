@@ -35,6 +35,9 @@ pub(super) struct Lookup {
     pub(super) short_list: Vec<NodeInfo>,
     pub(super) already_queried: HashSet<NodeID>,
     pub(super) in_flight: HashMap<NodeID, Instant>,
+    // Nodes that responded to our FindValue with Nodes (i.e., did not have the value).
+    // Used for caching the value at the closest non-holder on successful lookup.
+    pub(super) non_holders: Vec<NodeInfo>,
 }
 
 impl Lookup {
@@ -62,7 +65,33 @@ impl Lookup {
             short_list,
             already_queried: HashSet::new(),
             in_flight: HashMap::new(),
+            non_holders: Vec::new(),
         }
+    }
+
+    /// Record a responder that returned Nodes (i.e., did not have the value).
+    /// Ignores duplicates and our own node id.
+    pub(super) fn record_non_holder(&mut self, responder: NodeInfo) {
+        if responder.node_id == self.my_node_id {
+            return;
+        }
+        if !self
+            .non_holders
+            .iter()
+            .any(|n| n.node_id == responder.node_id)
+        {
+            self.non_holders.push(responder);
+        }
+    }
+
+    /// Return the closest recorded non-holder to the lookup target, if any.
+    pub(super) fn best_non_holder(&self) -> Option<NodeInfo> {
+        self
+            .non_holders
+            .iter()
+            .filter(|n| n.node_id != self.my_node_id)
+            .min_by_key(|n| n.node_id.distance(&self.target))
+            .copied()
     }
 
     /// If there are fewer than `alpha` queries in flight, return Effects to top up.

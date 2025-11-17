@@ -98,6 +98,22 @@ pub type Key = NodeID;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Distance(H160);
 
+impl Distance {
+    pub fn leading_zeros(&self) -> u32 {
+        let bytes = self.0.as_fixed_bytes();
+        let mut lz = 0u32;
+        for b in bytes.iter() {
+            if *b == 0 {
+                lz += 8;
+            } else {
+                lz += (*b as u8).leading_zeros();
+                break;
+            }
+        }
+        lz
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeInfo {
     #[serde(with = "serde_ipaddr")]

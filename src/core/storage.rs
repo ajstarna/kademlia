@@ -31,7 +31,6 @@ impl Storage {
         self.map.insert(key, entry);
     }
 
-    #[cfg(test)]
     pub fn insert_with_ttl(&mut self, key: Key, value: Value, ttl: Duration) {
         let expires_at = Instant::now() + ttl;
         let entry = Entry { value, expires_at };

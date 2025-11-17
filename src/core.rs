@@ -35,6 +35,10 @@ impl NodeState {
         self.storage.insert(key, value);
     }
 
+    pub fn store_with_ttl(&mut self, key: Key, value: Value, ttl: std::time::Duration) {
+        self.storage.insert_with_ttl(key, value, ttl);
+    }
+
     pub fn get(&self, key: &Key) -> Option<&Value> {
         self.storage.get(key)
     }
