@@ -532,7 +532,12 @@ impl ProtocolManager {
                         .resolve_probe(pending.lru, /*alive =*/ true);
                 } else {
                     // TODO: is there more to think about here?
-                    warn!(?node_id, rpc_id=?rpc_id, "Pong received without matching probe");
+                    warn!(
+                        ?node_id,
+                        rpc_id = ?rpc_id,
+                        "Pong received without matching probe; dropping and not observing contact"
+                    );
+                    return Ok(effects);
                 }
                 (node_id, is_client)
             }
@@ -579,7 +584,7 @@ impl ProtocolManager {
             Message::Nodes {
                 node_id,
                 target,
-                rpc_id: _,
+                rpc_id,
                 nodes,
                 is_client,
             } => {
@@ -596,6 +601,30 @@ impl ProtocolManager {
                 let mut remove_lookup: bool = false; // remove if there are no more in-flight requests
                 let i_am_client = self.is_client();
                 if let Some(pending_lookup) = self.pending_lookups.get_mut(&target) {
+                    // Validate rpc_id matches what we have in-flight for this responder
+                    if let Some((expected_rpc, _deadline)) =
+                        pending_lookup.lookup.in_flight.get(&node_id).cloned()
+                    {
+                        if expected_rpc != rpc_id {
+                            warn!(
+                                event = "rpc_mismatch_nodes",
+                                ?target,
+                                responder = ?node_id,
+                                expected = ?expected_rpc,
+                                got = ?rpc_id,
+                                "Dropping Nodes due to rpc_id mismatch"
+                            );
+                            return Ok(effects);
+                        }
+                    } else {
+                        warn!(
+                            event = "rpc_unknown_nodes",
+                            ?target,
+                            responder = ?node_id,
+                            "Dropping Nodes with no matching in-flight request"
+                        );
+                        return Ok(effects);
+                    }
                     // If this was a Value lookup, record the responder as a non-holder
                     if let LookupKind::Value = pending_lookup.lookup.kind {
                         let responder = NodeInfo {
@@ -731,11 +760,37 @@ impl ProtocolManager {
             Message::ValueFound {
                 node_id,
                 key,
-                rpc_id: _,
+                rpc_id,
                 value,
                 is_client,
             } => {
                 debug!(key=?key, value=?value, "Received ValueFound");
+                // Validate rpc_id against the in-flight request for this responder
+                if let Some(pending_lookup) = self.pending_lookups.get_mut(&key) {
+                    if let Some((expected_rpc, _deadline)) =
+                        pending_lookup.lookup.in_flight.get(&node_id).cloned()
+                    {
+                        if expected_rpc != rpc_id {
+                            warn!(
+                                event = "rpc_mismatch_value",
+                                ?key,
+                                responder = ?node_id,
+                                expected = ?expected_rpc,
+                                got = ?rpc_id,
+                                "Dropping ValueFound due to rpc_id mismatch"
+                            );
+                            return Ok(effects);
+                        }
+                    } else {
+                        warn!(
+                            event = "rpc_unknown_value",
+                            ?key,
+                            responder = ?node_id,
+                            "Dropping ValueFound with no matching in-flight request"
+                        );
+                        return Ok(effects);
+                    }
+                }
                 if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
                     info!(?key, ?node_id, "Lookup completed with value");
@@ -792,6 +847,8 @@ impl ProtocolManager {
         };
 
         // now we add the peer to our routing_table
+	// Note: any unexpected/mismatched rpc_id returns early from this method,
+	// so we won't be adding them as a contact to our routing table. They are suspect.
         if !peer_is_client {
             if let Some(eff) = self.observe_contact(src_addr, node_id) {
                 effects.push(eff);
@@ -1427,21 +1484,36 @@ mod test {
         // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let _ = pm
+        let effects_init = pm
             .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
         // Nodes reply from p1 introducing a new peer p4
         let p4 = make_peer(4, 6004, 0x03);
+        // Extract rpc_id for the initial request sent to p1
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let mut rpc_to_p1: Option<RpcId> = None;
+        for eff in effects_init.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == p1_addr {
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
+                        rpc_to_p1 = Some(rpc_id);
+                        break;
+                    }
+                }
+            }
+        }
+        let rpc_to_p1 = rpc_to_p1.expect("should have sent FindValue to p1");
         let nodes_msg = Message::Nodes {
             node_id: p1.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_p1,
             nodes: vec![p4],
             is_client: false,
         };
-        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_msg, p1_addr).await.unwrap();
 
         // Expect a new FindValue sent to p4 to maintain alpha
@@ -1536,20 +1608,35 @@ mod test {
         // Start the lookup for this target via Command::Get
         let key: Key = NodeID(target.0);
         let (tx, _rx) = tokio::sync::oneshot::channel::<Option<Value>>();
-        let _ = pm
+        let effects_init = pm
             .handle_command(Command::Get { key, tx_value: tx })
             .await
             .unwrap();
 
+        // Extract rpc_id for the initial request to p1
+        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
+        let mut rpc_to_p1: Option<RpcId> = None;
+        for eff in effects_init.into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if addr == p1_addr {
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
+                        rpc_to_p1 = Some(rpc_id);
+                        break;
+                    }
+                }
+            }
+        }
+        let rpc_to_p1 = rpc_to_p1.expect("should have FindValue to p1");
         // Act: simulate a Nodes reply from p1 that introduces p_new
         let nodes_msg = Message::Nodes {
             node_id: p1.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_p1,
             nodes: vec![p_new],
             is_client: false,
         };
-        let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_msg, p1_addr).await.unwrap();
 
         // Assert: expect a FindValue sent to p_new to top up concurrency
@@ -1603,67 +1690,75 @@ mod test {
             .await
             .unwrap();
 
-        // Expect a FindValue sent to p1
+        // Expect a FindValue sent to p1, capture its rpc_id
         let mut sent_to_p1 = false;
+        let mut rpc_to_p1: Option<RpcId> = None;
         for eff in effects.into_iter() {
             if let Effect::Send { addr, bytes } = eff {
                 if addr == SocketAddr::new(p1.ip_address, p1.udp_port) {
-                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
-                        if matches!(msg, Message::FindValue { .. }) {
-                            sent_to_p1 = true;
-                        }
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
+                        sent_to_p1 = true;
+                        rpc_to_p1 = Some(rpc_id);
                     }
                 }
             }
         }
         assert!(sent_to_p1, "lookup should start by querying p1");
+        let rpc_to_p1 = rpc_to_p1.expect("FindValue to p1 should carry rpc_id");
 
         // Simulate p1 responding with a Nodes message introducing p2
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_p1,
             nodes: vec![p2],
             is_client: false,
         };
         let p1_addr = SocketAddr::new(p1.ip_address, p1.udp_port);
         let effects = pm.handle_message(nodes_from_p1, p1_addr).await.unwrap();
 
-        // Expect a top-up FindValue to p2 (alpha=1, slot freed by p1's reply)
+        // Expect a top-up FindValue to p2 (alpha=1) and capture its rpc_id
         let mut sent_to_p2 = false;
+        let mut rpc_to_p2: Option<RpcId> = None;
         for eff in effects.into_iter() {
             if let Effect::Send { addr, bytes } = eff {
                 if addr == SocketAddr::new(p2.ip_address, p2.udp_port) {
-                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
-                        if matches!(msg, Message::FindValue { .. }) {
-                            sent_to_p2 = true;
-                        }
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
+                        sent_to_p2 = true;
+                        rpc_to_p2 = Some(rpc_id);
                     }
                 }
             }
         }
         assert!(sent_to_p2, "Nodes from p1 should trigger query to p2");
+        let rpc_to_p2 = rpc_to_p2.expect("FindValue to p2 should carry rpc_id");
 
         // Simulate p2 responding with a Nodes message introducing p3
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_p2,
             nodes: vec![p3],
             is_client: false,
         };
         let p2_addr = SocketAddr::new(p2.ip_address, p2.udp_port);
         let effects = pm.handle_message(nodes_from_p2, p2_addr).await.unwrap();
 
-        // Expect a top-up FindValue to p3
+        // Expect a top-up FindValue to p3, capture its rpc_id
         let mut sent_to_p3 = false;
+        let mut rpc_to_p3: Option<RpcId> = None;
         for eff in effects.into_iter() {
             if let Effect::Send { addr, bytes } = eff {
                 if addr == SocketAddr::new(p3.ip_address, p3.udp_port) {
-                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
-                        if matches!(msg, Message::FindValue { .. }) {
-                            sent_to_p3 = true;
-                        }
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
+                        sent_to_p3 = true;
+                        rpc_to_p3 = Some(rpc_id);
                     }
                 }
             }
@@ -1675,7 +1770,7 @@ mod test {
         let found = Message::ValueFound {
             node_id: p3.node_id,
             key,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_p3.expect("FindValue to p3 should carry rpc_id"),
             value: value.clone(),
             is_client: false,
         };
@@ -1712,32 +1807,38 @@ mod test {
             .await
             .unwrap();
 
-        // Expect exactly alpha initial FindNode queries
-        let initial_sends: Vec<SocketAddr> = effects
-            .into_iter()
-            .filter_map(|eff| match eff {
-                Effect::Send { addr, bytes } => {
-                    if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
-                        if matches!(msg, Message::FindNode { .. }) {
-                            return Some(addr);
-                        }
+        // Expect exactly alpha initial FindNode queries and capture rpc_ids
+        let mut initial_sends: Vec<SocketAddr> = Vec::new();
+        let mut rpc_p1: Option<RpcId> = None;
+        let mut rpc_p2: Option<RpcId> = None;
+        for eff in effects.clone().into_iter() {
+            if let Effect::Send { addr, bytes } = eff {
+                if let Ok(Message::FindNode { rpc_id, .. }) =
+                    rmp_serde::from_slice::<Message>(&bytes)
+                {
+                    if addr == SocketAddr::new(p1.ip_address, p1.udp_port) {
+                        rpc_p1 = Some(rpc_id);
                     }
-                    None
+                    if addr == SocketAddr::new(p2.ip_address, p2.udp_port) {
+                        rpc_p2 = Some(rpc_id);
+                    }
+                    initial_sends.push(addr);
                 }
-                _ => None,
-            })
-            .collect();
+            }
+        }
         assert_eq!(
             initial_sends.len(),
             2,
             "should send alpha FindNode requests"
         );
+        let rpc_p1 = rpc_p1.expect("FindNode to p1 should have rpc_id");
+        let rpc_p2 = rpc_p2.expect("FindNode to p2 should have rpc_id");
 
         // Simulate a Nodes reply from p1 that does not improve the shortlist (duplicates only)
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_p1,
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1768,7 +1869,7 @@ mod test {
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_p2,
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1844,14 +1945,23 @@ mod test {
             .await
             .unwrap();
 
-        // Expect initial FindNode requests to p1 and p2
+        // Expect initial FindNode requests to p1 and p2; capture rpc_ids for both
         let mut findnode_dests = Vec::new();
-        for eff in effects.into_iter() {
+        let mut rpc_p1: Option<RpcId> = None;
+        let mut rpc_p2: Option<RpcId> = None;
+        for eff in effects.clone().into_iter() {
             if let Effect::Send { addr, bytes } = eff {
-                if let Ok(msg) = rmp_serde::from_slice::<Message>(&bytes) {
-                    if matches!(msg, Message::FindNode { .. }) {
-                        findnode_dests.push(addr);
+                if let Ok(Message::FindNode { rpc_id, .. }) =
+                    rmp_serde::from_slice::<Message>(&bytes)
+                {
+                    if addr == std::net::SocketAddr::new(p1.ip_address, p1.udp_port) {
+                        rpc_p1 = Some(rpc_id);
+                    } else if addr
+                        == std::net::SocketAddr::new(p2.ip_address, p2.udp_port)
+                    {
+                        rpc_p2 = Some(rpc_id);
                     }
+                    findnode_dests.push(addr);
                 }
             }
         }
@@ -1868,7 +1978,7 @@ mod test {
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_p1.expect("FindNode to p1 should carry rpc_id"),
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1884,7 +1994,7 @@ mod test {
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_p2.expect("FindNode to p2 should carry rpc_id"),
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -2004,11 +2114,15 @@ mod test {
 
         // Expect an initial FindValue to the non-holder
         let mut sent_to_nonholder = false;
+        let mut rpc_to_nonholder: Option<RpcId> = None;
         for eff in effects.into_iter() {
             if let Effect::Send { addr, bytes } = eff {
                 if addr == std::net::SocketAddr::new(p_nonholder.ip_address, p_nonholder.udp_port) {
-                    if let Ok(Message::FindValue { .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
                         sent_to_nonholder = true;
+                        rpc_to_nonholder = Some(rpc_id);
                     }
                 }
             }
@@ -2019,7 +2133,7 @@ mod test {
         let nodes_from_nonholder = Message::Nodes {
             node_id: p_nonholder.node_id,
             target: key,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_nonholder.expect("FindValue to non-holder should carry rpc_id"),
             nodes: vec![p_provider],
             is_client: false,
         };
@@ -2028,11 +2142,15 @@ mod test {
 
         // Expect a FindValue to the provider now
         let mut sent_to_provider = false;
+        let mut rpc_to_provider: Option<RpcId> = None;
         for eff in effects.into_iter() {
             if let Effect::Send { addr, bytes } = eff {
                 if addr == std::net::SocketAddr::new(p_provider.ip_address, p_provider.udp_port) {
-                    if let Ok(Message::FindValue { .. }) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if let Ok(Message::FindValue { rpc_id, .. }) =
+                        rmp_serde::from_slice::<Message>(&bytes)
+                    {
                         sent_to_provider = true;
+                        rpc_to_provider = Some(rpc_id);
                     }
                 }
             }
@@ -2043,7 +2161,7 @@ mod test {
         let found = Message::ValueFound {
             node_id: p_provider.node_id,
             key,
-            rpc_id: RpcId::new_random(),
+            rpc_id: rpc_to_provider.expect("FindValue to provider should carry rpc_id"),
             value: value.clone(),
             is_client: false,
         };

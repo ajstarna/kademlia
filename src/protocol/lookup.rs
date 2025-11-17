@@ -34,7 +34,7 @@ pub(super) struct Lookup {
     pub(super) kind: LookupKind,
     pub(super) short_list: Vec<NodeInfo>,
     pub(super) already_queried: HashSet<NodeID>,
-    pub(super) in_flight: HashMap<NodeID, Instant>,
+    pub(super) in_flight: HashMap<NodeID, (RpcId, Instant)>,
     // Nodes that responded to our FindValue with Nodes (i.e., did not have the value).
     // Used for caching the value at the closest non-holder on successful lookup.
     pub(super) non_holders: Vec<NodeInfo>,
@@ -132,7 +132,7 @@ impl Lookup {
 
             // now set a deadline and add to in flight
             let deadline = Instant::now() + LOOKUP_TIMEOUT;
-            self.in_flight.insert(info.node_id, deadline);
+            self.in_flight.insert(info.node_id, (rpc_id, deadline));
             self.already_queried.insert(info.node_id);
         }
         effects
@@ -160,7 +160,7 @@ impl Lookup {
     /// Remove expired in-flight queries.
     pub(super) fn sweep_expired(&mut self, now: Instant) {
         let mut expired = Vec::new();
-        for (key, deadline) in self.in_flight.iter() {
+        for (key, (_rpc_id, deadline)) in self.in_flight.iter() {
             if *deadline <= now {
                 expired.push(*key);
             }
