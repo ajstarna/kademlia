@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProbeID(u64);
+pub struct RpcId(u64);
 
-impl ProbeID {
+impl RpcId {
     pub fn new_random() -> Self {
         let val: u64 = rand::rng().random();
         Self(val)

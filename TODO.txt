@@ -18,3 +18,5 @@
 
 - how to test at scale and in a real network setting?
    - if we mock udp we could test large scale locally. simulate a network with flakiness
+   - measure how many hops lookups are usually taking
+   - add ways to debug which nodes are holding which values

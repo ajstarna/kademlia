@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, Duration, Instant, MissedTickBehavior};
 
 use crate::{
-    core::identifier::{Key, NodeID, NodeInfo, ProbeID},
+    core::identifier::{Key, NodeID, NodeInfo, RpcId},
     core::routing_table::InsertResult,
     core::storage::Value,
     core::NodeState,
@@ -35,12 +35,12 @@ pub enum NodeRole {
 enum Message {
     Ping {
         node_id: NodeID,
-        probe_id: ProbeID, // a unique id for this specific request
+        rpc_id: RpcId, // request/response correlation token
         is_client: bool,
     },
     Pong {
         node_id: NodeID,
-        probe_id: ProbeID, // a unique id for this specific request
+        rpc_id: RpcId, // request/response correlation token
         is_client: bool,
     },
     Store {
@@ -53,22 +53,26 @@ enum Message {
     FindNode {
         node_id: NodeID,
         target: NodeID,
+        rpc_id: RpcId,
         is_client: bool,
     },
     Nodes {
         node_id: NodeID,
         target: NodeID, // we need to include the target to map the nodes to the lookup
+        rpc_id: RpcId,
         nodes: Vec<NodeInfo>,
         is_client: bool,
     },
     FindValue {
         node_id: NodeID,
         key: Key,
+        rpc_id: RpcId,
         is_client: bool,
     },
     ValueFound {
         node_id: NodeID,
         key: Key,
+        rpc_id: RpcId,
         value: Value,
         is_client: bool,
     },
@@ -91,7 +95,7 @@ enum Effect {
     StartProbe {
         lru: NodeInfo,
         candidates: Vec<NodeInfo>,
-        probe_id: ProbeID,
+        rpc_id: RpcId,
         bytes: Vec<u8>,
     },
 }
@@ -111,8 +115,8 @@ pub struct ProtocolManager {
     rx: Option<mpsc::Receiver<Command>>, // Optional: commands from a library user
     pub k: usize,
     pub alpha: usize, // concurrency parameter
-    pending_probes: HashMap<ProbeID, PendingProbe>,
-    pending_probe_by_lru: HashMap<NodeID, ProbeID>,
+pending_probes: HashMap<RpcId, PendingProbe>,
+pending_probe_by_lru: HashMap<NodeID, RpcId>,
     pending_lookups: HashMap<NodeID, PendingLookup>,
     role: NodeRole,
 }
@@ -130,7 +134,7 @@ impl ProtocolManager {
 
         let node = NodeState::new(k, ip, port);
 
-        let pending_probes: HashMap<ProbeID, PendingProbe> = HashMap::new();
+        let pending_probes: HashMap<RpcId, PendingProbe> = HashMap::new();
         let pending_lookups: HashMap<NodeID, PendingLookup> = HashMap::new();
         Ok(Self {
             node,
@@ -176,10 +180,10 @@ impl ProtocolManager {
                         }
                         break;
                     }
-                    let probe_id = ProbeID::new_random();
+                    let rpc_id = RpcId::new_random();
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
-                        probe_id,
+                        rpc_id,
                         is_client: self.is_client(),
                     };
                     if let Ok(bytes) = rmp_serde::to_vec(&ping) {
@@ -189,14 +193,14 @@ impl ProtocolManager {
                         let _ = self.socket.send_to(&bytes, addr).await;
                         let deadline = Instant::now() + PROBE_TIMEOUT;
                         self.pending_probes.insert(
-                            probe_id,
+                            rpc_id,
                             PendingProbe {
                                 lru,
                                 candidates: vec![peer],
                                 deadline,
                             },
                         );
-                        self.pending_probe_by_lru.insert(lru.node_id, probe_id);
+                        self.pending_probe_by_lru.insert(lru.node_id, rpc_id);
                     }
                     break;
                 }
@@ -272,10 +276,10 @@ impl ProtocolManager {
                 }
                 InsertResult::Full { lru } => {
                     debug!("Full bucket");
-                    let probe_id = ProbeID::new_random();
+                    let rpc_id = RpcId::new_random();
                     let ping = Message::Ping {
                         node_id: self.node.my_info.node_id,
-                        probe_id,
+                        rpc_id,
                         is_client: self.is_client(),
                     };
                     let bytes = rmp_serde::to_vec(&ping).expect("serialize probe Ping");
@@ -289,7 +293,7 @@ impl ProtocolManager {
                         return Some(Effect::StartProbe {
                             lru,
                             candidates: vec![peer],
-                            probe_id,
+                            rpc_id,
                             bytes,
                         });
                     }
@@ -337,6 +341,7 @@ impl ProtocolManager {
                 let query = Message::FindNode {
                     node_id: my_id,
                     target: my_id,
+                    rpc_id: RpcId::new_random(),
                     is_client: self.is_client(),
                 };
                 let bytes = rmp_serde::to_vec(&query)?;
@@ -496,13 +501,13 @@ impl ProtocolManager {
         let (node_id, peer_is_client) = match msg {
             Message::Ping {
                 node_id,
-                probe_id,
+                rpc_id,
                 is_client,
             } => {
                 debug!(?node_id, "Received Ping");
                 let pong = Message::Pong {
                     node_id: self.node.my_info.node_id,
-                    probe_id,
+                    rpc_id,
                     is_client: self.is_client(),
                 };
                 let bytes = rmp_serde::to_vec(&pong)?;
@@ -515,19 +520,19 @@ impl ProtocolManager {
 
             Message::Pong {
                 node_id,
-                probe_id,
+                rpc_id,
                 is_client,
             } => {
                 debug!(?node_id, "Received Pong");
                 // Maybe mark the node as alive or update routing table
-                if let Some(pending) = self.pending_probes.remove(&probe_id) {
+                if let Some(pending) = self.pending_probes.remove(&rpc_id) {
                     self.pending_probe_by_lru.remove(&pending.lru.node_id);
                     self.node
                         .routing_table
                         .resolve_probe(pending.lru, /*alive =*/ true);
                 } else {
                     // TODO: is there more to think about here?
-                    warn!(?node_id, probe_id=?probe_id, "Pong received without matching probe");
+                    warn!(?node_id, rpc_id=?rpc_id, "Pong received without matching probe");
                 }
                 (node_id, is_client)
             }
@@ -550,6 +555,7 @@ impl ProtocolManager {
             Message::FindNode {
                 node_id,
                 target,
+                rpc_id,
                 is_client,
             } => {
                 debug!(?target, "FindNode request");
@@ -558,6 +564,7 @@ impl ProtocolManager {
                 let nodes = Message::Nodes {
                     node_id: self.node.my_info.node_id,
                     target,
+                    rpc_id,
                     nodes: closest,
                     is_client: self.is_client(),
                 };
@@ -572,6 +579,7 @@ impl ProtocolManager {
             Message::Nodes {
                 node_id,
                 target,
+                rpc_id: _,
                 nodes,
                 is_client,
             } => {
@@ -682,6 +690,7 @@ impl ProtocolManager {
             Message::FindValue {
                 node_id,
                 key,
+                rpc_id,
                 is_client,
             } => {
                 debug!(?key, "FindValue request");
@@ -691,6 +700,7 @@ impl ProtocolManager {
                     let found = Message::ValueFound {
                         node_id: self.node.my_info.node_id,
                         key,
+                        rpc_id,
                         value: value.clone(),
                         is_client: self.is_client(),
                     };
@@ -706,6 +716,7 @@ impl ProtocolManager {
                     let nodes = Message::Nodes {
                         node_id: self.node.my_info.node_id,
                         target: key,
+                        rpc_id,
                         nodes: closest,
                         is_client: self.is_client(),
                     };
@@ -720,6 +731,7 @@ impl ProtocolManager {
             Message::ValueFound {
                 node_id,
                 key,
+                rpc_id: _,
                 value,
                 is_client,
             } => {
@@ -799,7 +811,7 @@ impl ProtocolManager {
             Effect::StartProbe {
                 lru,
                 candidates,
-                probe_id,
+                rpc_id,
                 bytes,
             } => {
                 let addr = SocketAddr::new(lru.ip_address, lru.udp_port);
@@ -809,14 +821,14 @@ impl ProtocolManager {
                     // Record the probe so we can resolve it later
                     let deadline = Instant::now() + PROBE_TIMEOUT;
                     self.pending_probes.insert(
-                        probe_id,
+                        rpc_id,
                         PendingProbe {
                             lru,
                             candidates,
                             deadline,
                         },
                     );
-                    self.pending_probe_by_lru.insert(lru.node_id, probe_id);
+                    self.pending_probe_by_lru.insert(lru.node_id, rpc_id);
                 }
             }
         }
@@ -833,13 +845,13 @@ impl ProtocolManager {
 
         // Expired probes: evict LRU and try to insert queued candidates; if still full, start a new probe.
         let mut expired_probes = Vec::new();
-        for (probe_id, pending_probe) in self.pending_probes.iter() {
+        for (rpc_id, pending_probe) in self.pending_probes.iter() {
             if pending_probe.deadline <= now {
-                expired_probes.push((*probe_id, pending_probe.clone()));
+                expired_probes.push((*rpc_id, pending_probe.clone()));
             }
         }
-        for (probe_id, mut pending) in expired_probes {
-            self.pending_probes.remove(&probe_id);
+        for (rpc_id, mut pending) in expired_probes {
+            self.pending_probes.remove(&rpc_id);
             self.pending_probe_by_lru.remove(&pending.lru.node_id);
             let _ = self
                 .node
@@ -858,10 +870,10 @@ impl ProtocolManager {
                     }
                     InsertResult::Full { lru } => {
                         // Still full: start a new probe for this (new) LRU and carry remaining candidates.
-                        let probe_id = ProbeID::new_random();
+                        let rpc_id = RpcId::new_random();
                         let ping = Message::Ping {
                             node_id: self.node.my_info.node_id,
-                            probe_id,
+                            rpc_id,
                             is_client: self.is_client(),
                         };
                         if let Ok(bytes) = rmp_serde::to_vec(&ping) {
@@ -869,7 +881,7 @@ impl ProtocolManager {
                             effects.push(Effect::StartProbe {
                                 lru,
                                 candidates: remaining,
-                                probe_id,
+                                rpc_id,
                                 bytes,
                             });
                         }
@@ -1013,10 +1025,10 @@ mod test {
         let mut pm = ProtocolManager::new_headless(dummy_socket, 20, 3).unwrap();
 
         let src_id = NodeID::new();
-        let probe_id = ProbeID::new_random();
+        let rpc_id = RpcId::new_random();
         let msg = Message::Ping {
             node_id: src_id,
-            probe_id,
+            rpc_id,
             is_client: false,
         };
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -1034,9 +1046,14 @@ mod test {
             Effect::Send { addr, bytes } => {
                 assert_eq!(addr, src);
                 let reply: Message = rmp_serde::from_slice(&bytes).unwrap();
-                assert!(
-                    matches!(reply, Message::Pong { node_id, probe_id: pid, .. } if node_id == pm.node.my_info.node_id && pid == probe_id )
-                );
+                assert!(matches!(
+                    reply,
+                    Message::Pong {
+                        node_id,
+                        rpc_id: pid,
+                        ..
+                    } if node_id == pm.node.my_info.node_id && pid == rpc_id
+                ));
             }
             _ => panic!("expected Send Pong effect, got {:?}", effect),
         }
@@ -1075,6 +1092,7 @@ mod test {
         let find_msg = Message::FindValue {
             node_id: src_id,
             key: key.clone(),
+            rpc_id: RpcId::new_random(),
             is_client: false,
         };
 
@@ -1122,6 +1140,7 @@ mod test {
         let msg: Message = Message::FindValue {
             node_id: src_id,
             key,
+            rpc_id: RpcId::new_random(),
             is_client: false,
         };
         let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -1156,6 +1175,7 @@ mod test {
         let msg: Message = Message::FindValue {
             node_id: src_id,
             key,
+            rpc_id: RpcId::new_random(),
             is_client: false,
         };
         let src: SocketAddr = "127.0.0.1:4001".parse().unwrap();
@@ -1286,7 +1306,7 @@ mod test {
         let c1 = make_peer(23, 9104, non_byte | 0x02);
         let c2 = make_peer(24, 9105, non_byte | 0x03);
 
-        // First candidate triggers a probe; capture lru and probe_id
+        // First candidate triggers a probe; capture lru and rpc_id
         let eff1 = pm
             .observe_contact(
                 std::net::SocketAddr::new(c1.ip_address, c1.udp_port),
@@ -1294,15 +1314,15 @@ mod test {
             )
             .expect("should start a probe for full bucket");
 
-        let (lru, probe_id, bytes) = match eff1 {
+        let (lru, rpc_id, bytes) = match eff1 {
             Effect::StartProbe {
                 lru,
                 candidates,
-                probe_id,
+                rpc_id,
                 bytes,
             } => {
                 assert_eq!(candidates.len(), 1);
-                (lru, probe_id, bytes)
+                (lru, rpc_id, bytes)
             }
             _ => panic!("expected StartProbe effect"),
         };
@@ -1311,7 +1331,7 @@ mod test {
         pm.apply_effect(Effect::StartProbe {
             lru,
             candidates: vec![c1],
-            probe_id,
+            rpc_id,
             bytes,
         })
         .await;
@@ -1326,7 +1346,7 @@ mod test {
         // Act: simulate a Pong from the probed LRU (alive)
         let pong = Message::Pong {
             node_id: lru.node_id,
-            probe_id,
+            rpc_id,
             is_client: false,
         };
         let lru_addr = std::net::SocketAddr::new(lru.ip_address, lru.udp_port);
@@ -1417,6 +1437,7 @@ mod test {
         let nodes_msg = Message::Nodes {
             node_id: p1.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p4],
             is_client: false,
         };
@@ -1524,6 +1545,7 @@ mod test {
         let nodes_msg = Message::Nodes {
             node_id: p1.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p_new],
             is_client: false,
         };
@@ -1600,6 +1622,7 @@ mod test {
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p2],
             is_client: false,
         };
@@ -1625,6 +1648,7 @@ mod test {
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p3],
             is_client: false,
         };
@@ -1651,6 +1675,7 @@ mod test {
         let found = Message::ValueFound {
             node_id: p3.node_id,
             key,
+            rpc_id: RpcId::new_random(),
             value: value.clone(),
             is_client: false,
         };
@@ -1712,6 +1737,7 @@ mod test {
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1742,6 +1768,7 @@ mod test {
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1841,6 +1868,7 @@ mod test {
         let nodes_from_p1 = Message::Nodes {
             node_id: p1.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1856,6 +1884,7 @@ mod test {
         let nodes_from_p2 = Message::Nodes {
             node_id: p2.node_id,
             target,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p1, p2],
             is_client: false,
         };
@@ -1990,6 +2019,7 @@ mod test {
         let nodes_from_nonholder = Message::Nodes {
             node_id: p_nonholder.node_id,
             target: key,
+            rpc_id: RpcId::new_random(),
             nodes: vec![p_provider],
             is_client: false,
         };
@@ -2013,6 +2043,7 @@ mod test {
         let found = Message::ValueFound {
             node_id: p_provider.node_id,
             key,
+            rpc_id: RpcId::new_random(),
             value: value.clone(),
             is_client: false,
         };

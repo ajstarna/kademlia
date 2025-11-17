@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 
-use crate::core::identifier::{NodeID, NodeInfo};
+use crate::core::identifier::{NodeID, NodeInfo, RpcId};
 use crate::core::storage::Value;
 
 // Timeouts specific to lookup requests
@@ -109,15 +109,18 @@ impl Lookup {
             .collect();
 
         for info in available {
+            let rpc_id = RpcId::new_random();
             let query = match self.kind {
                 LookupKind::Node => super::Message::FindNode {
                     node_id: self.my_node_id,
                     target: self.target,
+                    rpc_id,
                     is_client: self.is_client,
                 },
                 LookupKind::Value => super::Message::FindValue {
                     node_id: self.my_node_id,
                     key: self.target,
+                    rpc_id,
                     is_client: self.is_client,
                 },
             };
