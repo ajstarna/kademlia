@@ -5,6 +5,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::core::identifier::{NodeID, NodeInfo, RpcId};
 use crate::core::storage::Value;
+use tracing::debug;
 
 // Timeouts specific to lookup requests
 pub(super) const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -125,6 +126,15 @@ impl Lookup {
                 },
             };
             let bytes = rmp_serde::to_vec(&query).expect("serialize FindNode/FindValue");
+            debug!(
+                event = "lookup_send",
+                kind = ?self.kind,
+                target = ?self.target,
+                dest = ?info.node_id,
+                addr = %std::net::SocketAddr::new(info.ip_address, info.udp_port),
+                rpc_id = ?rpc_id,
+                "Sending lookup query"
+            );
             effects.push(super::Effect::Send {
                 addr: SocketAddr::new(info.ip_address, info.udp_port),
                 bytes,
@@ -140,6 +150,7 @@ impl Lookup {
 
     /// Merge new Nodes responses into the shortlist and keep top-k by distance.
     pub(super) fn merge_new_nodes(&mut self, nodes: Vec<NodeInfo>) {
+        let prev_len = self.short_list.len();
         self.short_list.extend(nodes);
 
         let mut seen = HashSet::new();
@@ -155,6 +166,14 @@ impl Lookup {
         if self.short_list.len() > self.k {
             self.short_list.truncate(self.k);
         }
+        debug!(
+            event = "lookup_merge",
+            kind = ?self.kind,
+            target = ?self.target,
+            shortlist_len = self.short_list.len(),
+            added = self.short_list.len().saturating_sub(prev_len),
+            "Merged Nodes into shortlist"
+        );
     }
 
     /// Remove expired in-flight queries.

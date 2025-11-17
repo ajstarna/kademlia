@@ -581,14 +581,8 @@ impl ProtocolManager {
                 (node_id, is_client)
             }
 
-            Message::Nodes {
-                node_id,
-                target,
-                rpc_id,
-                nodes,
-                is_client,
-            } => {
-                debug!(?target, "Received Nodes");
+            Message::Nodes { node_id, target, rpc_id, nodes, is_client } => {
+                debug!(?target, ?rpc_id, count=%nodes.len(), "Received Nodes");
                 // observe all the new nodes we just learned about
                 for n in &nodes {
                     if let Some(eff) =
@@ -716,16 +710,11 @@ impl ProtocolManager {
                 (node_id, is_client)
             }
 
-            Message::FindValue {
-                node_id,
-                key,
-                rpc_id,
-                is_client,
-            } => {
-                debug!(?key, "FindValue request");
+            Message::FindValue { node_id, key, rpc_id, is_client } => {
+                debug!(?key, ?rpc_id, "FindValue request");
                 // Lookup the value, or return closest nodes if not found
                 if let Some(value) = self.node.get(&key) {
-                    debug!(?value, "We had the requested value.");
+                    debug!(value_len=%value.len(), "We had the requested value.");
                     let found = Message::ValueFound {
                         node_id: self.node.my_info.node_id,
                         key,
@@ -757,14 +746,8 @@ impl ProtocolManager {
                 }
                 (node_id, is_client)
             }
-            Message::ValueFound {
-                node_id,
-                key,
-                rpc_id,
-                value,
-                is_client,
-            } => {
-                debug!(key=?key, value=?value, "Received ValueFound");
+            Message::ValueFound { node_id, key, rpc_id, value, is_client } => {
+                debug!(key=?key, ?rpc_id, value_len=%value.len(), "Received ValueFound");
                 // Validate rpc_id against the in-flight request for this responder
                 if let Some(pending_lookup) = self.pending_lookups.get_mut(&key) {
                     if let Some((expected_rpc, _deadline)) =
@@ -791,6 +774,7 @@ impl ProtocolManager {
                         return Ok(effects);
                     }
                 }
+                debug!(event="rpc_ok_value", ?key, responder=?node_id, ?rpc_id, "Accepted ValueFound reply");
                 if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
                     // we drop the lookup entirely once we get back the value
                     info!(?key, ?node_id, "Lookup completed with value");
@@ -886,6 +870,13 @@ impl ProtocolManager {
                         },
                     );
                     self.pending_probe_by_lru.insert(lru.node_id, rpc_id);
+                    debug!(
+                        event = "probe_start",
+                        lru = ?lru.node_id,
+                        rpc_id = ?rpc_id,
+                        addr = %addr,
+                        "Started LRU probe"
+                    );
                 }
             }
         }
@@ -934,13 +925,20 @@ impl ProtocolManager {
                             is_client: self.is_client(),
                         };
                         if let Ok(bytes) = rmp_serde::to_vec(&ping) {
-                            let remaining: Vec<NodeInfo> = queue.into_iter().collect();
+                            let remaining: Vec<NodeInfo> = queue.clone().into_iter().collect();
                             effects.push(Effect::StartProbe {
                                 lru,
                                 candidates: remaining,
                                 rpc_id,
                                 bytes,
                             });
+                            debug!(
+                                event = "probe_restart",
+                                new_lru = ?lru.node_id,
+                                rpc_id = ?rpc_id,
+                                remaining = %queue.len(),
+                                "Starting follow-up probe due to full bucket"
+                            );
                         }
                         break;
                     }

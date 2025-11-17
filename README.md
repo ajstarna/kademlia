@@ -22,6 +22,13 @@ Known, intentional deviations from the paper:
 - Build: `cargo build`
 - Tests: `cargo test`
 
+**Logging**
+- Set `RUST_LOG` to control verbosity. Examples:
+  - `RUST_LOG=info cargo run peer …` for high‑level events.
+  - `RUST_LOG=kademlia=debug cargo run get …` for detailed tracing.
+- Info logs include: lookup completion, replication/cache STORE sends, STORE receipts, probe timeouts.
+- Debug logs include: lookup sends/top‑ups, shortlist merges, Nodes/ValueFound rpc_id validation, probe start/restart.
+
 ## CLI
 
 Subcommands:
