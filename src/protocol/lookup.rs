@@ -91,8 +91,7 @@ impl Lookup {
 
     /// Return the closest recorded non-holder to the lookup target, if any.
     pub(super) fn best_non_holder(&self) -> Option<NodeInfo> {
-        self
-            .non_holders
+        self.non_holders
             .iter()
             .filter(|n| n.node_id != self.my_node_id)
             .min_by_key(|n| n.node_id.distance(&self.target))

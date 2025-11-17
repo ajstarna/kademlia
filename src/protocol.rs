@@ -115,8 +115,8 @@ pub struct ProtocolManager {
     rx: Option<mpsc::Receiver<Command>>, // Optional: commands from a library user
     pub k: usize,
     pub alpha: usize, // concurrency parameter
-pending_probes: HashMap<RpcId, PendingProbe>,
-pending_probe_by_lru: HashMap<NodeID, RpcId>,
+    pending_probes: HashMap<RpcId, PendingProbe>,
+    pending_probe_by_lru: HashMap<NodeID, RpcId>,
     pending_lookups: HashMap<NodeID, PendingLookup>,
     role: NodeRole,
     // For bootstrap self-lookup: track rpc_id by seed address for initial FindNode(self) sends
@@ -584,7 +584,13 @@ impl ProtocolManager {
                 (node_id, is_client)
             }
 
-            Message::Nodes { node_id, target, rpc_id, nodes, is_client } => {
+            Message::Nodes {
+                node_id,
+                target,
+                rpc_id,
+                nodes,
+                is_client,
+            } => {
                 debug!(?target, ?rpc_id, count=%nodes.len(), "Received Nodes");
                 let mut remove_lookup: bool = false; // remove if there are no more in-flight requests
                 let i_am_client = self.is_client();
@@ -606,8 +612,8 @@ impl ProtocolManager {
                 if valid {
                     // Observe contacts after validation
                     for n in &nodes {
-                        if let Some(eff) =
-                            self.observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id)
+                        if let Some(eff) = self
+                            .observe_contact(SocketAddr::new(n.ip_address, n.udp_port), n.node_id)
                         {
                             effects.push(eff);
                         }
@@ -695,7 +701,12 @@ impl ProtocolManager {
                 (node_id, is_client)
             }
 
-            Message::FindValue { node_id, key, rpc_id, is_client } => {
+            Message::FindValue {
+                node_id,
+                key,
+                rpc_id,
+                is_client,
+            } => {
                 debug!(?key, ?rpc_id, "FindValue request");
                 // Lookup the value, or return closest nodes if not found
                 if let Some(value) = self.node.get(&key) {
@@ -731,32 +742,38 @@ impl ProtocolManager {
                 }
                 (node_id, is_client)
             }
-            Message::ValueFound { node_id, key, rpc_id, value, is_client } => {
+            Message::ValueFound {
+                node_id,
+                key,
+                rpc_id,
+                value,
+                is_client,
+            } => {
                 debug!(key=?key, ?rpc_id, value_len=%value.len(), "Received ValueFound");
                 // Validate via Lookup API before mutating state
-		if let Some(pl) = self.pending_lookups.get(&key) {
-		    if !pl.lookup.validate_reply(node_id, rpc_id) {
-			// An invalid rpc id indicates possible spoofing.
-			warn!(
-                            event = "rpc_invalid_value",
-                            ?key,
-                            responder = ?node_id,
-                            ?rpc_id,
-                            "Dropping ValueFound due to mismatched rpc_id"
-			);
-			return Ok(effects);
-		    }
-		} else {
-		    // A missing pending_lookup could just mean that we already got the value from another node
-		    debug!(
-                        event = "missing_pending_lookup",
-                        ?key,
-                        responder = ?node_id,
-                        ?rpc_id,
-                        "ValueFound message does not correspond to an existing pending lookup. We likely already received the value "
-		    );
-		    return Ok(effects);
-		}
+                if let Some(pl) = self.pending_lookups.get(&key) {
+                    if !pl.lookup.validate_reply(node_id, rpc_id) {
+                        // An invalid rpc id indicates possible spoofing.
+                        warn!(
+                                        event = "rpc_invalid_value",
+                                        ?key,
+                                        responder = ?node_id,
+                                        ?rpc_id,
+                                        "Dropping ValueFound due to mismatched rpc_id"
+                        );
+                        return Ok(effects);
+                    }
+                } else {
+                    // A missing pending_lookup could just mean that we already got the value from another node
+                    debug!(
+                                event = "missing_pending_lookup",
+                                ?key,
+                                responder = ?node_id,
+                                ?rpc_id,
+                                "ValueFound message does not correspond to an existing pending lookup. We likely already received the value "
+                    );
+                    return Ok(effects);
+                }
 
                 debug!(event="rpc_ok_value", ?key, responder=?node_id, ?rpc_id, "Accepted ValueFound reply");
                 if let Some(mut pending_lookup) = self.pending_lookups.remove(&key) {
@@ -764,7 +781,7 @@ impl ProtocolManager {
                     info!(?key, ?node_id, "Lookup completed with value");
 
                     // On successful value lookup, cache the value at the closest non-holder (if any).
-		    // This helps currently important values return sooner next time someone looks it up.
+                    // This helps currently important values return sooner next time someone looks it up.
                     if let LookupKind::Value = pending_lookup.lookup.kind {
                         if let Some(best) = pending_lookup.lookup.best_non_holder() {
                             let ttl_secs = self.cache_ttl_secs_for(key, &best);
@@ -815,8 +832,8 @@ impl ProtocolManager {
         };
 
         // now we add the peer to our routing_table
-	// Note: any unexpected/mismatched rpc_id returns early from this method,
-	// so we won't be adding them as a contact to our routing table. They are suspect.
+        // Note: any unexpected/mismatched rpc_id returns early from this method,
+        // so we won't be adding them as a contact to our routing table. They are suspect.
         if !peer_is_client {
             if let Some(eff) = self.observe_contact(src_addr, node_id) {
                 effects.push(eff);
