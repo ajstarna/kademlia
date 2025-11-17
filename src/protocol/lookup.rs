@@ -36,6 +36,9 @@ pub(super) struct Lookup {
     pub(super) short_list: Vec<NodeInfo>,
     pub(super) already_queried: HashSet<NodeID>,
     pub(super) in_flight: HashMap<NodeID, (RpcId, Instant)>,
+    // Track the last rpc_id we sent per responder for this lookup so we can
+    // accept late replies while the lookup is still active.
+    pub(super) sent_rpcs: HashMap<NodeID, RpcId>,
     // Nodes that responded to our FindValue with Nodes (i.e., did not have the value).
     // Used for caching the value at the closest non-holder on successful lookup.
     pub(super) non_holders: Vec<NodeInfo>,
@@ -66,6 +69,7 @@ impl Lookup {
             short_list,
             already_queried: HashSet::new(),
             in_flight: HashMap::new(),
+            sent_rpcs: HashMap::new(),
             non_holders: Vec::new(),
         }
     }
@@ -144,6 +148,8 @@ impl Lookup {
             let deadline = Instant::now() + LOOKUP_TIMEOUT;
             self.in_flight.insert(info.node_id, (rpc_id, deadline));
             self.already_queried.insert(info.node_id);
+            // Record the rpc we sent so we can accept a late-but-legit reply
+            self.sent_rpcs.insert(info.node_id, rpc_id);
         }
         effects
     }
@@ -227,10 +233,18 @@ impl Lookup {
     /// Validate that a reply from `responder_id` echoes the expected rpc_id.
     /// Applies to both Nodes and ValueFound replies.
     pub(super) fn validate_reply(&self, responder_id: NodeID, rpc_id: RpcId) -> bool {
-        match self.in_flight.get(&responder_id) {
-            Some((expected, _deadline)) => *expected == rpc_id,
-            None => false,
+        // Accept on-time replies (match active in_flight)
+        if let Some((expected, _deadline)) = self.in_flight.get(&responder_id) {
+            return *expected == rpc_id;
         }
+        // Accept late-but-legit replies if the lookup is still active and the
+        // rpc_id matches what we sent to this responder earlier in this lookup.
+        if !self.is_finished() {
+            if let Some(expected) = self.sent_rpcs.get(&responder_id) {
+                return *expected == rpc_id;
+            }
+        }
+        false
     }
 }
 
