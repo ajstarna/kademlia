@@ -209,14 +209,6 @@ impl Lookup {
         self.possible_final_result().is_some()
     }
 
-    /// Validate that a Nodes reply from `responder_id` echoes the expected rpc_id.
-    pub(super) fn validate_nodes_reply(&self, responder_id: NodeID, rpc_id: RpcId) -> bool {
-        match self.in_flight.get(&responder_id) {
-            Some((expected, _deadline)) => *expected == rpc_id,
-            None => false,
-        }
-    }
-
     /// Apply a valid Nodes reply: record non-holder (for Value lookups),
     /// remove in-flight entry for responder, merge new nodes, and return any top-ups.
     pub(super) fn apply_nodes_reply(
@@ -232,8 +224,9 @@ impl Lookup {
         self.top_up_alpha_requests()
     }
 
-    /// Validate that a ValueFound reply from `responder_id` echoes the expected rpc_id.
-    pub(super) fn validate_value_reply(&self, responder_id: NodeID, rpc_id: RpcId) -> bool {
+    /// Validate that a reply from `responder_id` echoes the expected rpc_id.
+    /// Applies to both Nodes and ValueFound replies.
+    pub(super) fn validate_reply(&self, responder_id: NodeID, rpc_id: RpcId) -> bool {
         match self.in_flight.get(&responder_id) {
             Some((expected, _deadline)) => *expected == rpc_id,
             None => false,

@@ -591,7 +591,7 @@ impl ProtocolManager {
                 // Validate rpc_id using immutable borrow
                 let mut valid = false;
                 if let Some(pl) = self.pending_lookups.get(&target) {
-                    valid = pl.lookup.validate_nodes_reply(node_id, rpc_id);
+                    valid = pl.lookup.validate_reply(node_id, rpc_id);
                 }
                 if !valid && target == self.node.my_info.node_id {
                     // Bootstrap special-case: accept Nodes if rpc_id matches what we sent to this addr
@@ -735,7 +735,7 @@ impl ProtocolManager {
                 debug!(key=?key, ?rpc_id, value_len=%value.len(), "Received ValueFound");
                 // Validate via Lookup API before mutating state
 		if let Some(pl) = self.pending_lookups.get(&key) {
-		    if !pl.lookup.validate_value_reply(node_id, rpc_id) {
+		    if !pl.lookup.validate_reply(node_id, rpc_id) {
 			// An invalid rpc id indicates possible spoofing.
 			warn!(
                             event = "rpc_invalid_value",

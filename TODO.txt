@@ -1,8 +1,5 @@
-- improve/more logs, especially in debug. We should know all messages we are sending and receiving.
-
 - things missing as described in the paper:
     Protocol:
-    - echo RPC random ID to help with address forgery
     - optional "ping piggy back"
     - nodes that fail to respond during a lookup process are removed until they respond
 
