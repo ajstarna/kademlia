@@ -39,15 +39,6 @@ impl KBucket {
         self.node_infos.len() >= self.k
     }
 
-    #[allow(dead_code)]
-    pub fn try_insert(&mut self, info: NodeInfo) {
-        if self.node_infos.len() >= self.k {
-            // we should not even be calling this
-            unreachable!("Cannot insert into a full K bucket!");
-        }
-        self.node_infos.push_front(info);
-    }
-
     /// Insert or update a peer
     /// If it exists, we update its info.
     /// If the bucket is full, we signal for a probe on the LRU peer, else we add to the front as the new MRU
@@ -411,6 +402,20 @@ impl RoutingTable {
                         one
                     };
                 }
+            }
+        }
+    }
+
+    /// Insert a peer, absorbing any bucket splits that occur.
+    ///
+    /// This loops on `SplitOccurred` until the insert either succeeds,
+    /// updates, or reports `Full { lru }`.
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, peer: NodeInfo) -> InsertResult {
+        loop {
+            match self.try_insert(peer) {
+                InsertResult::SplitOccurred => continue,
+                other => break other,
             }
         }
     }

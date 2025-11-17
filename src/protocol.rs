@@ -1178,22 +1178,14 @@ mod test {
             (0x00, 0x80)
         };
 
-        // Helper to absorb possible splits while inserting directly into the routing table
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-
         // Fill root with two distinct peers in the same non-self bucket (same MSB, different lower bits)
         let pna = make_peer(10, 9001, non_byte | 0x00);
         let pnb = make_peer(11, 9002, non_byte | 0x01);
-        insert(pna);
-        insert(pnb);
+        let _ = pm.node.routing_table.insert(pna);
+        let _ = pm.node.routing_table.insert(pnb);
         // This insert should split the root into self/non-self buckets
         let ps = make_peer(12, 9003, self_byte);
-        insert(ps);
+        let _ = pm.node.routing_table.insert(ps);
 
         // Now non-self bucket should be full with pna, pnb (K=2).
         // Try to add two more distinct peers that land in the same non-self bucket.
@@ -1264,20 +1256,13 @@ mod test {
             (0x00, 0x80)
         };
 
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-
         // Fill root with two distinct peers in the same non-self bucket (same MSB)
         let pna = make_peer(20, 9101, non_byte | 0x00);
         let pnb = make_peer(21, 9102, non_byte | 0x01);
-        insert(pna);
-        insert(pnb);
+        let _ = pm.node.routing_table.insert(pna);
+        let _ = pm.node.routing_table.insert(pnb);
         let ps = make_peer(22, 9103, self_byte);
-        insert(ps);
+        let _ = pm.node.routing_table.insert(ps);
 
         // Two candidates arrive targeting the full non-self bucket (distinct IDs, same MSB)
         let c1 = make_peer(23, 9104, non_byte | 0x02);
@@ -1350,16 +1335,10 @@ mod test {
         let p4 = make_peer(4, 5004, 0x80); // far
 
         // Helper to absorb splits
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p1);
-        insert(p2);
-        insert(p3);
-        insert(p4);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
+        let _ = pm.node.routing_table.insert(p3);
+        let _ = pm.node.routing_table.insert(p4);
 
         // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
@@ -1403,15 +1382,9 @@ mod test {
         let p2 = make_peer(2, 6002, 0x01);
         let p3 = make_peer(3, 6003, 0x02);
 
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p1);
-        insert(p2);
-        insert(p3);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
+        let _ = pm.node.routing_table.insert(p3);
 
         // Start the lookup via Command::Get
         let key: Key = NodeID(target.0);
@@ -1460,15 +1433,9 @@ mod test {
         let p3 = make_peer(3, 6103, 0x80); // far
 
         // Insert peers, absorbing splits
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p1);
-        insert(p2);
-        insert(p3);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
+        let _ = pm.node.routing_table.insert(p3);
 
         // Start lookup via Command::Get: should send 2 initial FindValue requests (alpha=2)
         let key: Key = NodeID(target.0);
@@ -1524,14 +1491,8 @@ mod test {
         let p_new = make_peer(3, 7003, 0x02); // new candidate introduced by p1
 
         // Helper to absorb possible splits while inserting
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p1);
-        insert(p2);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
 
         // Start the lookup for this target via Command::Get
         let key: Key = NodeID(target.0);
@@ -1694,14 +1655,8 @@ mod test {
         let p2 = make_peer(2, 9002, 0x01); // next closest
 
         // Insert initial candidates into the routing table (absorb splits if they occur)
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p1);
-        insert(p2);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
 
         // Start a Node lookup towards `target` via Command::Put (performs node lookup under the hood)
         let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1828,14 +1783,8 @@ mod test {
         let p1 = make_peer(1, 9101, 0x00); // closest
         let p2 = make_peer(2, 9102, 0x01); // next closest
 
-        let mut insert = |peer: NodeInfo| loop {
-            match pm.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p1);
-        insert(p2);
+        let _ = pm.node.routing_table.insert(p1);
+        let _ = pm.node.routing_table.insert(p2);
 
         // Act: issue a Put command
         let key: Key = target;
@@ -1996,14 +1945,8 @@ mod test {
         let p_nonholder = make_peer(41, 9501, first_byte);
         let p_provider = make_peer(42, 9502, first_byte ^ 0x01);
 
-        // Insert the non-holder into the routing table (absorb possible splits)
-        let mut insert = |peer: NodeInfo| loop {
-            match pm_req.node.routing_table.try_insert(peer) {
-                InsertResult::SplitOccurred => continue,
-                _ => break,
-            }
-        };
-        insert(p_nonholder);
+        // Insert the non-holder into the routing table
+        let _ = pm_req.node.routing_table.insert(p_nonholder);
 
         // Act 1: start a Get lookup
         let (tx, _rx) = tokio::sync::oneshot::channel();
